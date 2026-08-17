@@ -77,6 +77,60 @@ group("app registry", () => {
   eq(BP.rejectedFields(patch), ["role_table", "token_rpc"], "rejectedFields names them");
 });
 
+group("auth kinds", () => {
+  const shared = { role_table: "app_roles", auth_kind: "shared" };
+  const entra  = { role_table: null, auth_kind: "entra" };
+  const pub    = { role_table: null, auth_kind: "none" };
+  const legacy = { role_table: null };                // written before auth_kind
+  const legacyManaged = { role_table: "app_roles" };
+
+  eq(BP.authKind(shared), "shared", "explicit shared");
+  eq(BP.authKind(entra), "entra", "explicit entra");
+  eq(BP.authKind(pub), "none", "explicit public");
+  eq(BP.authKind(legacy), "none", "legacy row with no role table → none");
+  eq(BP.authKind(legacyManaged), "shared", "legacy row with a role table → shared");
+  eq(BP.authKind({ auth_kind: "nonsense" }), "none", "unknown value falls back safely");
+
+  // The bug this models away: an Entra app must not be labelled public.
+  eq(BP.authMeta(entra).label, "Lennar sign-in", "Entra app is not called public");
+  ok(BP.authMeta(entra).tone !== "warn", "and does not get the amber public treatment");
+  eq(BP.authMeta(pub).label, "Public · no sign-in", "genuinely public app still says so");
+  eq(BP.authMeta(pub).tone, "warn", "and keeps the amber treatment");
+  eq(BP.authMeta(shared).tone, "ok", "shared sign-in reads as healthy");
+
+  // Authenticated is not the same as manageable here.
+  ok(!BP.isManaged(entra), "an Entra app is authenticated but not managed by Blueprint");
+  ok(BP.isManaged(shared), "a shared-sign-in app is");
+
+  // auth_kind is editable, but "shared" requires a role table.
+  eq(BP.pickEditable({ auth_kind: "entra" }, entra), { auth_kind: "entra" }, "entra accepted");
+  eq(BP.pickEditable({ auth_kind: "shared" }, entra), {},
+     "cannot claim the shared sign-in without a role table");
+  eq(BP.pickEditable({ auth_kind: "shared" }, shared), { auth_kind: "shared" },
+     "but may when a role table exists");
+  eq(BP.pickEditable({ auth_kind: "bogus" }, entra), {}, "invalid kind dropped");
+
+  // A form-added app defaults to Entra, never to public.
+  const v = BP.validateNewApp({ name: "Plan Library", url: "https://x.com/a" }, []);
+  eq(v.app.auth_kind, "entra", "new apps default to Lennar sign-in, not public");
+  const v2 = BP.validateNewApp({ name: "Open Map", url: "https://x.com/b", auth_kind: "none" }, []);
+  eq(v2.app.auth_kind, "none", "explicit public is honoured");
+  const v3 = BP.validateNewApp({ name: "Sneaky", url: "https://x.com/c", auth_kind: "shared" }, []);
+  eq(v3.app.auth_kind, "entra", "a form cannot create a shared-sign-in app");
+  eq(v3.app.role_table, null, "and gets no role table");
+});
+
+group("authors is always an array", () => {
+  // The live failure: a comma-separated string reached a Postgres text[] column
+  // and produced  malformed array literal: "Denis Crepes, Stephen Svedman"
+  eq(BP.parseAuthors("Denis Crepes, Stephen Svedman"),
+     ["Denis Crepes", "Stephen Svedman"], "CSV string parses to an array");
+  eq(BP.parseAuthors(["A", "B"]), ["A", "B"], "array passes through");
+  eq(BP.parseAuthors(""), [], "empty string → empty array");
+  eq(BP.parseAuthors("  Solo  "), ["Solo"], "trims");
+  eq(BP.parseAuthors("A, , B"), ["A", "B"], "drops empty entries");
+});
+
 group("removal is registry-only", () => {
   const managed = BP.removalImpact(APPS[0]);
   ok(managed.registryRowDeleted, "registry row is deleted");

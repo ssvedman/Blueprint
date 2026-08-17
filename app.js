@@ -226,30 +226,57 @@
     render();
   }
 
+  /* Renders are generation-guarded.
+     renderUsers and renderHealth await network data before writing to #view, so
+     switching tabs mid-load left a stale renderer to finish and overwrite the tab
+     you had moved to. Each render takes a token; any write after an await is
+     skipped once a newer render has started. The alternative — disabling the tabs
+     while loading — punishes the user for a bug in our sequencing. */
+  let renderSeq = 0;
+
   function render() {
     const v = $("view");
     if (!allowed(state.tab)) { state.tab = "apps"; renderTabs(); }
+    const token = ++renderSeq;
+    const stale = () => token !== renderSeq;
     if (state.tab === "apps") return renderApps(v);
-    if (state.tab === "users") return renderUsers(v);
-    if (state.tab === "health") return renderHealth(v);
+    if (state.tab === "users") return renderUsers(v, stale);
+    if (state.tab === "health") return renderHealth(v, stale);
   }
 
   /* --------------------------------------------------------------- shared UI */
 
   function iconHtml(app, cls) {
     const c = cls || "ic";
+    // Placeholder class differs by size but the styling is deliberately the same
+    // brand blue in both, so a generated mark stays readable in light and dark.
+    const phClass = c === "ic" ? "ic-ph" : c + " ph";
+    const initials = esc(shortOf(app));
+
     if (app.icon_url) {
+      // A configured icon that fails to load is also a missing asset, so it falls
+      // back to the identical flagged placeholder rather than an unstyled gap.
       return '<img class="' + c + '" src="' + esc(app.icon_url) + '" alt="" ' +
-             'onerror="this.outerHTML=\'<div class=&quot;' + c + ' ph&quot;>' +
-             esc(shortOf(app)) + '</div>\'">';
+             'onerror="this.outerHTML=\'<div class=&quot;' + phClass +
+             '&quot; title=&quot;Logo failed to load&quot;>' + initials + '</div>\'">';
     }
-    // No published logo. A flagged placeholder, never an invented mark.
-    return '<div class="' + (c === "ic" ? "ic-ph" : c + " ph") + '" title="No logo.svg published yet">' +
-           esc(shortOf(app)) + "</div>";
+    return '<div class="' + phClass + '" title="No logo.svg published yet">' +
+           initials + "</div>";
   }
 
   function shortOf(app) {
     return (app.name || "?").split(/\s+/).map(w => w[0]).join("").slice(0, 3).toUpperCase();
+  }
+
+  // How the app is entered. Three tones so an authenticated internal tool is
+  // never rendered with the amber "public" treatment reserved for open access.
+  function authChipHtml(app) {
+    const k = BP.authKind(app), m = BP.authMeta(app);
+    if (m.tone === "ok")   return '<span class="dot ok"></span> ' + esc(m.label);
+    if (m.tone === "warn") return '<span class="pubtag" title="' + esc(m.note) + '">' +
+                                  esc(m.label) + "</span>";
+    return '<span class="chip" title="' + esc(m.note) + '">' + esc(m.label) + "</span>" +
+           (k === "entra" ? "" : "");
   }
 
   function authorHtml(app) {
@@ -296,7 +323,6 @@
     if (!shown.length) return '<div class="panel"><div class="empty">No apps match that search.</div></div>';
 
     return '<div class="tilegrid">' + shown.map(a => {
-      const managed = BP.isManaged(a);
       return '<button class="apptile' + (a.active === false ? " inactive" : "") +
         '" data-open="' + esc(a.url) + '">' +
         '<div class="apptile-h">' + iconHtml(a) +
@@ -305,8 +331,7 @@
         "<p>" + esc(a.description || "") + "</p>" +
         authorHtml(a) +
         '<div class="apptile-f">' +
-          (managed ? '<span class="dot ok"></span> Shared sign-in'
-                   : '<span class="pubtag">Public &middot; no sign-in</span>') +
+          authChipHtml(a) +
           (a.active === false ? '<span class="cat-tag">inactive</span>' : "") +
           '<span class="go">Open &rarr;</span>' +
         "</div></button>";
@@ -318,16 +343,17 @@
     return '<div class="panel"><div class="panel-h">Registered apps<span class="sp"></span>' +
       '<button class="btn mini ghost" data-addapp>&#43; Add an app</button></div>' +
       '<div class="table-wrap"><table><thead><tr><th></th><th>Name</th><th>URL</th>' +
-      "<th>Author</th><th>Type</th><th>Active</th><th></th></tr></thead><tbody>" +
+      "<th>Author</th><th>Sign-in</th><th>Roles here</th><th>Active</th><th></th></tr></thead><tbody>" +
       apps.map(a =>
         "<tr>" +
           "<td>" + iconHtml(a, "ic-sm") + "</td>" +
           "<td><b>" + esc(a.name) + "</b></td>" +
           '<td class="urlc">' + esc(a.url.replace(/^https:\/\//, "").replace(/\/$/, "")) + "</td>" +
           "<td>" + esc(BP.formatAuthors(a.authors)) + "</td>" +
+          "<td>" + authChipHtml(a) + "</td>" +
           "<td>" + (BP.isManaged(a)
-            ? '<span class="chip">managed</span>'
-            : '<span class="pubtag">launcher only</span>') + "</td>" +
+            ? '<span class="chip">managed here</span>'
+            : '<span class="cat-tag">not managed here</span>') + "</td>" +
           '<td><input type="checkbox" data-active="' + esc(a.slug) + '"' +
             (a.active === false ? "" : " checked") + "></td>" +
           '<td class="num"><button class="linkbtn" data-edit="' + esc(a.slug) + '">Edit</button> ' +
@@ -335,9 +361,11 @@
         "</tr>").join("") +
       "</tbody></table></div>" +
       '<div class="panel-b" style="border-top:1px solid var(--line)"><p class="hint" style="margin:0">' +
-      "<b>managed</b> = has a role table, so it appears in Users and Health. " +
-      "<b>launcher only</b> = a tile and nothing more. Any app can be removed: that deletes only " +
-      "the Blueprint registry row, so no role data is touched and nobody loses access." +
+      "<b>Sign-in</b> is how people get in. <b>Roles here</b> is a different question: only apps " +
+      "using this hub's sign-in have roles Blueprint can administer. A Lennar app behind Entra ID " +
+      "is fully protected, but its access is managed in Entra, so it appears as a tile only. " +
+      "Any app can be removed: that deletes only the Blueprint registry row, so no role data is " +
+      "touched and nobody loses access." +
       "</p></div></div>";
   }
 
@@ -346,7 +374,8 @@
 
     v.querySelectorAll("[data-active]").forEach(cb => {
       cb.onchange = async () => {
-        const r = await DB.updateApp(cb.dataset.active, { active: cb.checked });
+        const app0 = state.apps.find(x => x.slug === cb.dataset.active);
+        const r = await DB.updateApp(cb.dataset.active, { active: cb.checked }, app0);
         if (!r.ok) { cb.checked = !cb.checked; return toast(r.error, "err"); }
         const a = state.apps.find(x => x.slug === cb.dataset.active);
         if (a) a.active = cb.checked;
@@ -392,7 +421,7 @@
   }
 
   function appFormHtml(app) {
-    const a = app || {};
+    const a = app || {};   // `app` (may be null for a new app) drives the default
     return '<div class="field-row"><div><label class="fld">Name</label>' +
       '<input type="text" id="afName" value="' + esc(a.name || "") + '" placeholder="e.g. Plan Library"></div>' +
       '<div><label class="fld">URL</label>' +
@@ -407,7 +436,28 @@
       '<div class="linkrow"><input type="text" id="afIcon" value="' + esc(a.icon_url || "") + '" placeholder="leave blank to auto-detect">' +
       '<button class="btn mini ghost" id="afDetect">Detect</button></div>' +
       '<p class="hint" id="afIconNote">Blank shows a flagged placeholder rather than an invented mark.</p></div></div>' +
+      '<div class="field-row"><div><label class="fld">Sign-in</label>' +
+      '<select class="std" id="afAuth" style="width:100%">' +
+      Object.keys(BP.AUTH_KINDS).map(k => {
+        const meta = BP.AUTH_KINDS[k];
+        // "Shared sign-in" is only selectable for an app that already has a role
+        // table — wiring is set in SQL, never granted by this form.
+        const disabled = k === "shared" && !(a && a.role_table);
+        const current = app ? BP.authKind(app) : "entra";
+        const selected = current === k;
+        return '<option value="' + k + '"' + (selected ? " selected" : "") +
+               (disabled ? " disabled" : "") + ">" + esc(meta.label) +
+               (disabled ? " — needs a role table" : "") + "</option>";
+      }).join("") + "</select>" +
+      '<p class="hint" id="afAuthNote"></p></div></div>' +
       '<div id="afMsg" class="msg"></div>';
+  }
+
+  function wireAuthNote() {
+    const sel = $("afAuth"), note = $("afAuthNote");
+    if (!sel || !note) return;
+    const sync = () => { note.textContent = (BP.AUTH_KINDS[sel.value] || {}).note || ""; };
+    sel.onchange = sync; sync();
   }
 
   function readAppForm() {
@@ -416,7 +466,8 @@
       url: $("afUrl").value.trim(),
       description: $("afDesc").value.trim(),
       authors: $("afAuthors").value,
-      icon_url: $("afIcon").value.trim() || null
+      icon_url: $("afIcon").value.trim() || null,
+      auth_kind: ($("afAuth") || {}).value
     };
   }
 
@@ -442,16 +493,18 @@
   function openAddApp() {
     modal("Add an app",
       appFormHtml(null) +
-      '<div class="warnbox"><b>New apps are launcher-only.</b><ul>' +
-      "<li>A tile, a URL, an author and an icon — that works immediately.</li>" +
-      "<li>Role management needs a role table and two RPCs to exist in the database first, " +
-      "so it cannot be granted from this form. That is a deliberate limit: a console that " +
-      "queries whatever table someone typed would be a probing tool.</li>" +
+      '<div class="warnbox"><b>Blueprint will not manage this app\'s roles.</b><ul>' +
+      "<li>A tile, a URL, an author, an icon and how people sign in — all of that works now.</li>" +
+      "<li>Most internal apps belong here as <b>Lennar sign-in</b>: protected by Entra ID, with " +
+      "access managed in Entra rather than in this hub.</li>" +
+      "<li>Only apps using this hub's own sign-in can be administered here, and that needs a role " +
+      "table and two RPCs in the database first. It cannot be granted from this form — a console " +
+      "that queried whatever table someone typed would be a probing tool.</li>" +
       "</ul></div>" +
       '<div class="modal-actions"><button class="btn ghost" data-no>Cancel</button>' +
       '<button class="btn" data-yes>Add app</button></div>',
       (ov, close) => {
-        wireDetect();
+        wireDetect(); wireAuthNote();
         ov.querySelector("[data-no]").onclick = close;
         ov.querySelector("[data-yes]").onclick = async () => {
           const r = await DB.addApp(readAppForm(), state.apps);
@@ -479,16 +532,16 @@
       '<div class="modal-actions"><button class="btn ghost" data-no>Cancel</button>' +
       '<button class="btn" data-yes>Save</button></div>',
       (ov, close) => {
-        wireDetect();
+        wireDetect(); wireAuthNote();
         ov.querySelector("[data-no]").onclick = close;
         ov.querySelector("[data-yes]").onclick = async () => {
           const form = readAppForm();
           const u = BP.validateUrl(form.url);
           if (!u.ok) { const m = $("afMsg"); m.className = "msg err"; m.textContent = u.error; return; }
           form.url = u.url;
-          const r = await DB.updateApp(app.slug, form);
+          const r = await DB.updateApp(app.slug, form, app);
           if (!r.ok) { const m = $("afMsg"); m.className = "msg err"; m.textContent = r.error; return; }
-          Object.assign(app, BP.pickEditable(form));
+          Object.assign(app, r.patch);
           state.apps = BP.sortApps(state.apps);
           close();
           toast(app.name + " updated", "ok");
@@ -508,15 +561,18 @@
      division checkboxes somewhere sensible to live.
      ---------------------------------------------------------------------- */
 
-  async function renderUsers(v) {
+  async function renderUsers(v, stale) {
+    stale = stale || (() => false);
     v.innerHTML = '<div class="panel"><div class="empty">Loading users…</div></div>';
 
     // divisions are needed by the access editor; fetch once per app
     for (const app of BP.managedApps(state.apps)) {
       if (!state.divisions[app.slug]) state.divisions[app.slug] = await DB.divisionsFor(app);
+      if (stale()) return;
     }
 
     const { rows, failures } = await DB.loadUsers(state.apps);
+    if (stale()) return;          // user switched tabs while this was loading
     state.users = rows;
 
     const managed = BP.managedApps(state.apps);
@@ -558,6 +614,7 @@
       '<button class="btn mini ghost" id="pvRefresh">Refresh</button></div>' +
       '<div id="pvPending"><div class="empty">Loading…</div></div></div>';
 
+    if (stale()) return;
     v.innerHTML = html;
 
     $("usAdd").onclick = () => openAccess(null);
@@ -566,7 +623,7 @@
       b.onclick = () => openAccess(b.dataset.manage);
     });
 
-    loadPending();
+    loadPending(stale);
 
     if (state.prefillEmail) {
       const e = state.prefillEmail;
@@ -774,10 +831,13 @@
     if (!links.length) { ov.remove(); render(); }
   }
 
-  async function loadPending() {
+  async function loadPending(stale) {
+    stale = stale || (() => false);
     const el = $("pvPending");
     if (!el) return;
     const r = await DB.pendingInvites();
+    // The element may have been replaced by a different tab's render.
+    if (stale() || !document.body.contains(el)) return;
     if (!r.ok) { el.innerHTML = '<div class="empty">' + esc(r.error) + "</div>"; return; }
     if (!r.rows.length) { el.innerHTML = '<div class="empty">No outstanding invite links.</div>'; return; }
     el.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Pool</th>' +
@@ -796,32 +856,43 @@
 
   /* ----------------------------------------------------------------- HEALTH */
 
-  async function renderHealth(v) {
+  async function renderHealth(v, stale) {
+    stale = stale || (() => false);
     v.innerHTML = '<div class="panel"><div class="empty">Running checks…</div></div>';
     const H = CFG.HEALTH;
     const panels = [];
     const alerts = [];
 
     for (const app of BP.sortApps(state.apps)) {
+      if (stale()) return;        // health runs many queries; bail out early
       if (!BP.isManaged(app)) {
         const up = await DB.reachable(app.url);
+        if (stale()) return;
+        const meta = BP.authMeta(app);
+        const kind = BP.authKind(app);
         panels.push({
-          name: app.name, state: up ? "ok" : "bad", tag: "public",
+          name: app.name, state: up ? "ok" : "bad",
+          tag: kind === "none" ? "public" : "not managed here",
           checks: [
             row("Site reachable", up ? "yes" : "no", up ? "ok" : "bad"),
-            row("Backend", "own database", null, "not shared"),
-            row("Authentication", "none", null, "by design"),
-            row("Data freshness", "not visible", null, "self-reported only")
+            row("Sign-in", meta.label, null, kind === "shared" ? null : "external"),
+            row("Access managed in",
+                kind === "entra" ? "Microsoft Entra ID"
+                  : kind === "none" ? "nothing to manage" : "the app itself"),
+            row("Data", "not visible to Blueprint", null, "separate backend")
           ]
         });
         if (!up) alerts.push(app.name + " did not respond.");
         continue;
       }
       const p = await healthForApp(app, H, alerts);
+      if (stale()) return;
       panels.push(p);
     }
 
-    panels.push(await accountsHealth(H, alerts));
+    const acct = await accountsHealth(H, alerts);
+    if (stale()) return;
+    panels.push(acct);
 
     v.innerHTML =
       '<div class="toolbar"><button class="btn mini" id="hRerun">&#8635; Re-run checks</button>' +
@@ -838,7 +909,8 @@
         '<div class="panel-b" style="padding-top:6px">' + p.checks.join("") + "</div></div>"
       ).join("") + "</div>";
 
-    $("hRerun").onclick = () => render();
+    const rerun = $("hRerun");
+    if (rerun) rerun.onclick = () => render();
   }
 
   function row(label, value, st, tag) {
@@ -848,41 +920,84 @@
       (tag ? '<span class="cat-tag">' + esc(tag) + "</span>" : "") + "</div>";
   }
 
+  /* Health checks are DIVISION-AGNOSTIC by rule.
+     Every metric aggregates across all divisions and none is labelled with, or
+     broken down by, a division. Blueprint is a hub — per-division detail belongs
+     in the app that owns it, where the division selector gives it context. A
+     count here that silently covered only one division, or that mixed divisions
+     under a label implying one, would be worse than no number at all.
+
+     Each metric also has to mean what its label says. Two originally did not:
+       · "Rows missing a plan name" counted flow_rows.plan_name IS NULL — but that
+         column is an optional manual override, normally null because the name is
+         looked up from tf_plan_names. It would have flagged most of the table as
+         broken. The real signal is the missing_plans field the app itself uses.
+       · "Open takeoff changes" counted every row in takeoff_changes. That table
+         has no status column; it has a `complete` boolean. Completed requests were
+         being reported as open. */
   async function healthForApp(app, H, alerts) {
     const checks = [];
     const roleRows = await DB.count(app.role_table);
     let st = "ok";
 
     if (app.slug === "Vendor-Portal") {
-      const last = await DB.newest("division_data", "updated_at");
-      const days = last ? BP.daysSince(last.updated_at) : null;
+      // Latest upload across every division, not a per-division breakdown.
+      const { data } = await DB.client.from("division_data").select();
+      const rows = data || [];
+      const latest = rows.reduce((a, r) =>
+        (!a || new Date(r.updated_at) > new Date(a.updated_at)) ? r : a, null);
+      const days = latest ? BP.daysSince(latest.updated_at) : null;
       const s = days == null ? "warn" : BP.assess(days, H.staleUploadDays);
-      checks.push(row("Divisions published", String(await DB.count("division_data") ?? "—")));
-      checks.push(row("Last data upload", days == null ? "unknown" : BP.relativeDay(last.updated_at), s));
-      if (last) checks.push(row("Last uploaded by", (last.updated_by || "—").split("@")[0]));
+      const rollback = rows.filter(r => r.prev_payload).length;
+
+      checks.push(row("Last data upload", days == null ? "unknown" : BP.relativeDay(latest.updated_at), s));
+      if (latest && latest.updated_by) {
+        checks.push(row("Last uploaded by", latest.updated_by.split("@")[0]));
+      }
       checks.push(row("Change-log entries", String(await DB.count("change_log") ?? "—")));
-      checks.push(row("Rollback snapshot", last && last.prev_payload ? "present" : "none",
-        last && last.prev_payload ? "ok" : "warn"));
-      if (s !== "ok") alerts.push(app.name + " data was last uploaded " + BP.relativeDay(last && last.updated_at) + ".");
+      checks.push(row("Rollback snapshots available", String(rollback),
+        rollback > 0 ? "ok" : "warn"));
+      if (s !== "ok" && latest) {
+        alerts.push(app.name + " was last updated " + BP.relativeDay(latest.updated_at) + ".");
+      }
       st = worse(st, s);
     }
 
     if (app.slug === "Takeoff-Flow") {
-      const rows = await DB.count("flow_rows");
-      const { data } = await DB.client.from("flow_rows").select();
-      const missing = (data || []).filter(r => !r.plan_name).length;
-      const s = BP.assess(missing, H.missingPlanNames);
-      const cols = await DB.count("pending_budget_cols");
-      const { data: colRows } = await DB.client.from("pending_budget_cols").select();
-      const bound = (colRows || []).filter(c => c.assigned_email).length;
-      checks.push(row("Flow rows", String(rows ?? "—")));
-      checks.push(row("Rows missing a plan name", String(missing), s));
-      checks.push(row("Budget columns bound", bound + " of " + cols, bound === cols ? "ok" : "warn"));
-      checks.push(row("Open takeoff changes", String(await DB.count("takeoff_changes") ?? "—")));
+      const { data: flow } = await DB.client.from("flow_rows").select();
+      const rows = flow || [];
+
+      // missing_plans is the free-text field the app's own To-Do list reads;
+      // non-empty means that row is waiting on plans.
+      const flagged = rows.filter(r => (r.missing_plans || "").trim()).length;
+      // first_trench_date drives every calculated date column, so a null is a
+      // genuine gap rather than a stylistic one.
+      const noTrench = rows.filter(r => !r.first_trench_date).length;
+
+      const { data: colData } = await DB.client.from("pending_budget_cols").select();
+      const cols = colData || [];
+      const unassigned = cols.filter(c => !(c.assigned_email || "").trim()).length;
+
+      const { data: chgData } = await DB.client.from("takeoff_changes").select();
+      const open = (chgData || []).filter(c => !c.complete).length;
+
+      const sFlag = BP.assess(flagged, H.flaggedMissingPlans);
+      const sTrench = BP.assess(noTrench, H.missingTrenchDates);
+      const sCols = BP.assess(unassigned, H.unassignedBudgetCols);
+
       const last = await DB.newest("tf_change_log", "at");
+
+      checks.push(row("Flow rows", String(rows.length)));
+      checks.push(row("Rows flagged missing plans", String(flagged), sFlag));
+      checks.push(row("Rows with no trench date", String(noTrench), sTrench));
+      checks.push(row("Open takeoff changes", String(open)));
+      checks.push(row("Budget columns with no assignee", String(unassigned), sCols));
       checks.push(row("Last edit", last ? BP.relativeDay(last.at) : "unknown"));
-      if (s !== "ok") alerts.push(app.name + " has " + missing + " rows with no plan name.");
-      st = worse(st, s);
+
+      if (sFlag !== "ok") alerts.push(app.name + " has " + flagged + " rows flagged as missing plans.");
+      if (sTrench !== "ok") alerts.push(app.name + " has " + noTrench + " rows with no trench date.");
+      if (sCols !== "ok") alerts.push(app.name + " has " + unassigned + " budget columns with no assignee.");
+      st = worse(worse(worse(st, sFlag), sTrench), sCols);
     }
 
     if (app.slug === "Community-DB") {
@@ -891,17 +1006,26 @@
       const drafts = all.filter(r => r.status === "draft").length;
       const pub = all.filter(r => r.status === "published").length;
       const review = all.filter(r => r.needs_review).length;
+      const inactive = all.filter(r => r.status === "published" && r.active === false).length;
+
       const lastPub = await DB.newest("cdb_cis_revisions", "published_at");
       const days = lastPub ? BP.daysSince(lastPub.published_at) : null;
       const sD = BP.assess(drafts, H.unpublishedDrafts);
       const sP = days == null ? "warn" : BP.assess(days, H.stalePublishDays);
+      const sR = BP.assess(review, H.needsReview);
+
       checks.push(row("Published communities", String(pub)));
       checks.push(row("Unpublished drafts", String(drafts), sD));
-      checks.push(row("Flagged needs-review", String(review), BP.assess(review, H.needsReview)));
+      checks.push(row("Flagged needs-review", String(review), sR));
+      checks.push(row("Hidden from viewers", String(inactive)));
       checks.push(row("Last publish", days == null ? "unknown" : BP.relativeDay(lastPub.published_at), sP));
       checks.push(row("Images stored", String(await DB.count("cdb_images") ?? "—")));
+
       if (sD !== "ok") alerts.push(app.name + " has " + drafts + " unpublished drafts.");
-      st = worse(worse(st, sD), sP);
+      if (sP !== "ok" && lastPub) {
+        alerts.push(app.name + " last published " + BP.relativeDay(lastPub.published_at) + ".");
+      }
+      st = worse(worse(worse(st, sD), sP), sR);
     }
 
     checks.push(row("Explicit role rows", String(roleRows ?? "—")));

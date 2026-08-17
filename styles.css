@@ -124,8 +124,14 @@ main{max-width:var(--maxw);margin:0 auto;padding:22px 24px 60px}
 .apptile.inactive{opacity:.55}
 .apptile-h{display:flex;align-items:center;gap:12px;margin-bottom:10px}
 .ic{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:block;object-fit:contain}
+/* Generated placeholder for an app that publishes no logo.svg.
+   The background is the literal brand blue, NOT var(--navy): --navy inverts in
+   dark mode to the light text colour, which left white text on a near-white
+   tile. Hardcoding #0057b8 matches the letter marks Takeoff Flow and Vendor
+   Assignments actually ship, so a generated icon is readable in both themes and
+   sits beside the real ones without looking out of place. */
 .ic-ph{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:grid;place-items:center;
-  background:var(--navy);color:#fff;font-weight:800;font-size:14px;position:relative}
+  background:#0057b8;color:#fff;font-weight:800;font-size:14px;position:relative}
 .ic-ph::after{content:"?";position:absolute;top:-4px;right:-4px;width:14px;height:14px;
   border-radius:50%;background:var(--warn);color:#fff;font-size:9px;display:grid;
   place-items:center;font-weight:800}
@@ -170,8 +176,11 @@ tbody tr:hover{background:var(--blue-050)}
 .rolesel{padding:5px 8px;border:1.5px solid var(--line);border-radius:7px;font-size:12.5px;
   font-weight:600;color:var(--navy);background:var(--card);font-family:inherit}
 .ic-sm{width:24px;height:24px;border-radius:6px;display:block;object-fit:contain;flex:0 0 auto}
-.ic-sm.ph{background:var(--navy);color:#fff;font-size:9px;font-weight:800;
+/* same reasoning as .ic-ph — theme-stable brand blue, not var(--navy) */
+.ic-sm.ph{background:#0057b8;color:#fff;font-size:9px;font-weight:800;
   display:grid;place-items:center}
+.ic.ph{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:grid;
+  place-items:center;background:#0057b8;color:#fff;font-weight:800;font-size:14px}
 .urlc{color:var(--muted);font-size:12.5px}
 
 /* ---------- Toolbar / forms ---------- */

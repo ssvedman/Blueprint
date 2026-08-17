@@ -297,6 +297,27 @@ const mk = () => createMockClient({ now: NOW });
        "an attempt to set role_table via edit is dropped");
   });
 
+  await group("array columns are type-checked like Postgres", async () => {
+    const sb = mk();
+    sb.__signInAs("avery.stone@lennar.com");
+
+    // This is the shape that failed in production. The mock used to accept it,
+    // which is why the test suite passed while the live edit errored.
+    const bad = await sb.from("hub_apps")
+      .update({ authors: "Denis Crepes, Stephen Svedman" }).eq("slug", "Community-DB");
+    ok(bad.error && /malformed array literal/.test(bad.error.message),
+       "a string sent to a text[] column is rejected, as Postgres would");
+
+    const good = await sb.from("hub_apps")
+      .update({ authors: ["Denis Crepes", "Stephen Svedman"] }).eq("slug", "Community-DB");
+    ok(!good.error, "an array is accepted");
+    const row = (await sb.from("hub_apps").select().eq("slug", "Community-DB").maybeSingle()).data;
+    eq(row.authors, ["Denis Crepes", "Stephen Svedman"], "and stored as an array");
+
+    eq((await sb.from("hub_apps").update({ description: "fine" }).eq("slug", "Community-DB")).error,
+       null, "non-array columns unaffected");
+  });
+
   await group("auth", async () => {
     const sb = mk();
     const bad = await sb.auth.signInWithPassword({ email: "nobody@lennar.com", password: "whatever" });

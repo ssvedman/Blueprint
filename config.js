@@ -51,7 +51,7 @@ window.APP_CONFIG = {
       url: "https://ssvedman.github.io/Vendor-Portal/",
       description: "Division vendor assignments, coverage gaps and starts, imported from E1 exports.",
       icon_url: "https://ssvedman.github.io/Vendor-Portal/logo.svg",
-      authors: ["Stephen Svedman"], active: true,
+      authors: ["Stephen Svedman"], active: true, auth_kind: "shared",
       role_table: "app_roles", list_rpc: "admin_list_users",
       token_rpc: "admin_add_or_reset", token_pool: "A",
       roles: ["admin", "editor", "viewer"], division_scoped_roles: ["editor"],
@@ -62,7 +62,7 @@ window.APP_CONFIG = {
       url: "https://ssvedman.github.io/Takeoff-Flow/",
       description: "Editable takeoff schedule with WORKDAY date math, pending budgets and change log.",
       icon_url: "https://ssvedman.github.io/Takeoff-Flow/logo.svg",
-      authors: ["Stephen Svedman"], active: true,
+      authors: ["Stephen Svedman"], active: true, auth_kind: "shared",
       role_table: "tf_app_roles", list_rpc: "tf_admin_list_users",
       token_rpc: "tf_admin_add_or_reset", token_pool: "A",
       roles: ["admin", "editor", "purchasing", "viewer"],
@@ -77,7 +77,7 @@ window.APP_CONFIG = {
       url: "https://ssvedman.github.io/Community-DB/",
       description: "Community information sheets with draft/publish workflow, images and meeting notes.",
       icon_url: "https://ssvedman.github.io/Community-DB/logo.svg",
-      authors: ["Denis Crepes", "Stephen Svedman"], active: true,
+      authors: ["Denis Crepes", "Stephen Svedman"], active: true, auth_kind: "shared",
       role_table: "cdb_app_roles", list_rpc: "cdb_admin_list_users",
       token_rpc: "cdb_admin_add_or_reset", token_pool: "B",
       roles: ["admin", "editor", "viewer"], division_scoped_roles: [],
@@ -92,7 +92,7 @@ window.APP_CONFIG = {
       slug: "lennar-map", name: "Community Map",
       url: "https://grant-slater.github.io/lennar-map/",
       description: "Orlando division community map — starts by month, trade-partner and vendor filters, utilities and municipality.",
-      icon_url: null, authors: ["Grant Slater"], active: true,
+      icon_url: null, authors: ["Grant Slater"], active: true, auth_kind: "none",
       role_table: null, list_rpc: null, token_rpc: null, token_pool: null,
       roles: [], division_scoped_roles: [],
       division_source: { kind: "none" }
@@ -106,7 +106,9 @@ window.APP_CONFIG = {
     stalePublishDays:  { warn: 7,  bad: 30 },   // days since last CDB publish
     unpublishedDrafts: { warn: 1,  bad: 10 },
     needsReview:       { warn: 1,  bad: 10 },
-    missingPlanNames:  { warn: 1,  bad: 25 },
+    flaggedMissingPlans:  { warn: 1, bad: 25 },  // flow_rows.missing_plans non-empty
+    missingTrenchDates:   { warn: 1, bad: 50 },  // no first_trench_date → no calc dates
+    unassignedBudgetCols: { warn: 1, bad: 3  },
     neverSignedIn:     { warn: 1,  bad: 10 },
     pendingInvites:    { warn: 3,  bad: 10 }
   },

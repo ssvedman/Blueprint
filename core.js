@@ -42,8 +42,39 @@
 
   /* -------------------------------------------------------------- app registry */
 
-  // An app is "managed" when it has a role table: it then appears in Users,
-  // Provision and the role-based parts of Health. Everything else is a tile.
+  /* How an app authenticates. This started as a binary — either it used this
+     hub's Supabase sign-in, or it was assumed public — which mislabelled any
+     Lennar app behind Entra ID as "Public · no sign-in". That is not a cosmetic
+     error: it tells the reader an internal tool is open to anyone with the link.
+
+     "Managed" and "authenticated" are separate questions. An Entra app is fully
+     authenticated but its roles live in Entra, so Blueprint cannot administer it
+     and it stays out of Users. Only `shared` apps appear there.                */
+  const AUTH_KINDS = {
+    shared: { label: "Shared sign-in",     tone: "ok",
+              note: "Uses this hub's sign-in; roles managed here" },
+    entra:  { label: "Lennar sign-in",     tone: "info",
+              note: "Microsoft Entra ID; access managed in Entra, not here" },
+    other:  { label: "External sign-in",   tone: "info",
+              note: "Has its own sign-in; access managed in that app" },
+    none:   { label: "Public · no sign-in", tone: "warn",
+              note: "Anyone with the link can open it" }
+  };
+
+  // Falls back for rows written before auth_kind existed: a role table implies
+  // the shared sign-in, and anything else was previously assumed public.
+  function authKind(app) {
+    const k = app && app.auth_kind;
+    if (k && AUTH_KINDS[k]) return k;
+    return app && app.role_table ? "shared" : "none";
+  }
+  function authMeta(app) {
+    return AUTH_KINDS[authKind(app)];
+  }
+
+  // An app is "managed" when it has a role table: it then appears in Users and
+  // the role-based parts of Health. Everything else is a tile — which now
+  // includes authenticated apps whose roles Blueprint does not own.
   function isManaged(app) {
     return !!(app && app.role_table);
   }
@@ -56,15 +87,22 @@
 
   // Blueprint interpolates role_table / *_rpc into queries, so these are never
   // admin-editable. Anything not on this list is rejected by saveApp().
+  // auth_kind is editable: it names no table and grants nothing, it just tells
+  // the reader how to get in. The one invariant is enforced below — an app may
+  // only claim the shared sign-in if it actually has a role table.
   const EDITABLE_APP_FIELDS = [
-    "name", "url", "description", "icon_url", "authors", "active"
+    "name", "url", "description", "icon_url", "authors", "active", "auth_kind"
   ];
 
-  function pickEditable(patch) {
+  function pickEditable(patch, app) {
     const out = {};
     for (const k of EDITABLE_APP_FIELDS) {
       if (patch && Object.prototype.hasOwnProperty.call(patch, k)) out[k] = patch[k];
     }
+    if (out.auth_kind && !AUTH_KINDS[out.auth_kind]) delete out.auth_kind;
+    // Claiming the shared sign-in without a role table would put an app in the
+    // Users tab with nothing to read. Refuse rather than half-apply.
+    if (out.auth_kind === "shared" && app && !app.role_table) delete out.auth_kind;
     return out;
   }
   function rejectedFields(patch) {
@@ -166,7 +204,13 @@
             // writes the SQL. The form cannot grant itself a role table.
             role_table: null, list_rpc: null, token_rpc: null, token_pool: null,
             roles: [],
-            division_source: { kind: "none" }
+            division_source: { kind: "none" },
+            // A form-added app has no role table, so it cannot be `shared`.
+            // Default to Entra: an internal Lennar tool is far more likely behind
+            // the corporate sign-in than genuinely public, and defaulting to
+            // "public" is the error that prompted this.
+            auth_kind: AUTH_KINDS[(form && form.auth_kind)] && form.auth_kind !== "shared"
+              ? form.auth_kind : "entra"
           }
         };
   }
@@ -437,7 +481,7 @@
 
   return {
     collator, byName, sortApps, sortEmails,
-    isManaged, managedApps, activeApps,
+    isManaged, managedApps, activeApps, AUTH_KINDS, authKind, authMeta,
     EDITABLE_APP_FIELDS, pickEditable, rejectedFields, slugify, removalImpact,
     normalizeEmail, validateEmail, validateUrl, validateNewApp,
     parseAuthors, formatAuthors, initialsOf,

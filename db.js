@@ -99,13 +99,22 @@ window.BPDB = (function () {
   // Only presentational fields are sent. The wiring columns are additionally
   // protected server-side by a trigger, so this is defence in depth rather
   // than the only guard.
-  async function updateApp(slug, patch) {
-    const clean = BP.pickEditable(patch);
+  //
+  // `authors` is a Postgres text[]. The edit form collects it as a comma-separated
+  // string, and sending that straight through produced
+  //   malformed array literal: "Denis Crepes, Stephen Svedman"
+  // The add path happened to work because validateNewApp() parses it. Normalising
+  // here means every caller is safe rather than each having to remember.
+  async function updateApp(slug, patch, app) {
+    const clean = BP.pickEditable(patch, app);
     const dropped = BP.rejectedFields(patch);
+    if ("authors" in clean) clean.authors = BP.parseAuthors(clean.authors);
     if (!Object.keys(clean).length) return { ok: false, error: "Nothing to update." };
     const { error } = await client.from("hub_apps").update(clean).eq("slug", slug);
     if (error) return { ok: false, error: friendly(error) };
-    return { ok: true, dropped };
+    // Hand back what was actually written so callers update their in-memory copy
+    // with the stored shape, not the raw form value.
+    return { ok: true, dropped, patch: clean };
   }
 
   // Registry-only delete. No role table is referenced here, by design: removing

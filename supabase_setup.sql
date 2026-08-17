@@ -86,6 +86,14 @@ create table if not exists public.hub_apps (
   authors      text[] not null default '{}',
   active       boolean not null default true,
 
+  -- How the app authenticates. Not the same question as whether Blueprint can
+  -- manage its roles: an Entra app is fully authenticated but its access lives in
+  -- Entra, so it stays out of the Users tab. Defaults to 'entra' because an
+  -- internal Lennar tool is far more likely behind the corporate sign-in than
+  -- genuinely public — and defaulting to 'none' would label it "Public".
+  auth_kind    text not null default 'entra'
+                 check (auth_kind in ('shared','entra','other','none')),
+
   -- wiring. null role_table = launcher-only (a tile and nothing more).
   role_table   text,
   list_rpc     text,
@@ -100,6 +108,12 @@ create table if not exists public.hub_apps (
   updated_at timestamptz not null default now(),
   updated_by text,
 
+  -- Only an app with a role table may claim the shared sign-in; otherwise it
+  -- would appear in Users with nothing to read.
+  constraint hub_apps_shared_needs_roles check (
+    auth_kind <> 'shared' or role_table is not null
+  ),
+
   -- A managed app needs all of its wiring, or none of it. Half-wired is the
   -- state that would produce confusing runtime failures.
   constraint hub_apps_wiring_complete check (
@@ -108,6 +122,16 @@ create table if not exists public.hub_apps (
     (role_table is not null and list_rpc is not null and token_rpc is not null and token_pool is not null)
   )
 );
+
+-- Backfill for a table created before auth_kind existed.
+alter table public.hub_apps
+  add column if not exists auth_kind text not null default 'entra';
+do $$ begin
+  alter table public.hub_apps add constraint hub_apps_auth_kind_valid
+    check (auth_kind in ('shared','entra','other','none'));
+exception when duplicate_object then null; end $$;
+update public.hub_apps set auth_kind = 'shared'
+  where role_table is not null and auth_kind <> 'shared';
 
 comment on table public.hub_apps is
   'Blueprint app registry. Deleting a row removes only the launcher tile; it never touches an app''s role table, so removal cannot revoke anyone''s access.';
@@ -249,14 +273,14 @@ grant execute on function public.hub_pending_invites() to authenticated;
    presentational fields and leaves wiring intact.                            */
 
 insert into public.hub_apps
-  (slug, name, url, description, icon_url, authors, active,
+  (slug, name, url, description, icon_url, authors, active, auth_kind,
    role_table, list_rpc, token_rpc, token_pool, roles, division_scoped_roles, division_source)
 values
   ('Vendor-Portal', 'Vendor Assignments',
    'https://ssvedman.github.io/Vendor-Portal/',
    'Division vendor assignments, coverage gaps and starts, imported from E1 exports.',
    'https://ssvedman.github.io/Vendor-Portal/logo.svg',
-   array['Stephen Svedman'], true,
+   array['Stephen Svedman'], true, 'shared',
    'app_roles', 'admin_list_users', 'admin_add_or_reset', 'A',
    array['admin','editor','viewer'], array['editor'],
    '{"kind":"table","table":"app_divisions"}'::jsonb),
@@ -265,7 +289,7 @@ values
    'https://ssvedman.github.io/Takeoff-Flow/',
    'Editable takeoff schedule with WORKDAY date math, pending budgets and change log.',
    'https://ssvedman.github.io/Takeoff-Flow/logo.svg',
-   array['Stephen Svedman'], true,
+   array['Stephen Svedman'], true, 'shared',
    'tf_app_roles', 'tf_admin_list_users', 'tf_admin_add_or_reset', 'A',
    array['admin','editor','purchasing','viewer'], array['editor','purchasing'],
    '{"kind":"config"}'::jsonb),
@@ -274,7 +298,7 @@ values
    'https://ssvedman.github.io/Community-DB/',
    'Community information sheets with draft/publish workflow, images and meeting notes.',
    'https://ssvedman.github.io/Community-DB/logo.svg',
-   array['Denis Crepes','Stephen Svedman'], true,
+   array['Denis Crepes','Stephen Svedman'], true, 'shared',
    'cdb_app_roles', 'cdb_admin_list_users', 'cdb_admin_add_or_reset', 'B',
    array['admin','editor','viewer'], array[]::text[],
    '{"kind":"config"}'::jsonb),
@@ -285,7 +309,7 @@ values
    'https://grant-slater.github.io/lennar-map/',
    'Orlando division community map — starts by month, trade-partner and vendor filters, utilities and municipality.',
    null,
-   array['Grant Slater'], true,
+   array['Grant Slater'], true, 'none',
    null, null, null, null, array[]::text[], array[]::text[],
    '{"kind":"none"}'::jsonb)
 
@@ -294,7 +318,8 @@ on conflict (slug) do update set
   url         = excluded.url,
   description = excluded.description,
   icon_url    = excluded.icon_url,
-  authors     = excluded.authors;
+  authors     = excluded.authors,
+  auth_kind   = excluded.auth_kind;
 
 /* ------------------------------------------------------------- verify ----- */
 -- Expected: 4 rows, ordered Community-DB, Community Map, Takeoff Flow,
