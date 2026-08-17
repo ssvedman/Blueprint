@@ -25,10 +25,13 @@ create extension if not exists pgcrypto;
 create or replace function public.hub_email() returns text
   language sql stable as $$ select lower(coalesce(auth.jwt()->>'email','')) $$;
 
--- Renamed from hub_is_lennar(). Drop the old name if an earlier version of this
--- file was already run; nothing outside this file referenced it.
-drop function if exists public.hub_is_lennar();
-
+-- Renamed from a legacy name (see the drop at the end of this file). The old
+-- function cannot be dropped here — if a
+-- previous version of this file has been run, hub_apps_read still depends on it,
+-- and Postgres refuses (2BP01). The drop happens at the very end of this file,
+-- after the policies have been rebuilt to use the new name and nothing points at
+-- the old one. CASCADE would also "work", but it would silently take the policy
+-- with it and leave the table briefly readable to anyone.
 create or replace function public.hub_is_allowed_domain() returns boolean
   language sql stable as $$ select public.hub_email() like '%@lennar.com' $$;
 
@@ -202,7 +205,17 @@ create trigger hub_apps_touch_trg before insert or update on public.hub_apps
 
 /* RLS ---------------------------------------------------------------------- */
 
+/* RLS is the security boundary for this table. The anon key is public by design,
+   so without a policy the table would be world-readable. Belt and braces:
+     · RLS enabled, with every policy scoped `to authenticated`
+     · table privileges revoked from anon entirely, so an unauthenticated request
+       is refused before policy evaluation even happens
+   A verification block at the end of this file fails loudly if either is missing,
+   because an accidentally-unprotected table is not something to discover later. */
 alter table public.hub_apps enable row level security;
+
+revoke all on public.hub_apps from anon;
+grant select, insert, update, delete on public.hub_apps to authenticated;
 
 -- Everyone signed in on the approved domain sees the active tiles; admins see
 -- everything including deactivated apps.
@@ -325,11 +338,52 @@ on conflict (slug) do update set
   authors     = excluded.authors,
   auth_kind   = excluded.auth_kind;
 
+/* ------------------------------------------------- rename cleanup --------- */
+/* Safe now: the policies above were rebuilt to call hub_is_allowed_domain(), so
+   nothing depends on the old name. No-op on a first install.                  */
+drop function if exists public.hub_is_lennar();
+
 /* ------------------------------------------------------------- verify ----- */
+/* Assert rather than trust. If this file is edited later and RLS or a policy is
+   dropped, the next run fails here instead of quietly leaving the registry open
+   to anyone holding the (public) anon key. */
+do $$
+declare
+  v_rls      boolean;
+  v_policies int;
+  v_anon     int;
+begin
+  select relrowsecurity into v_rls
+    from pg_class where oid = 'public.hub_apps'::regclass;
+  if not coalesce(v_rls, false) then
+    raise exception 'SECURITY: row level security is NOT enabled on public.hub_apps';
+  end if;
+
+  select count(*) into v_policies from pg_policies
+   where schemaname = 'public' and tablename = 'hub_apps';
+  if v_policies < 4 then
+    raise exception 'SECURITY: hub_apps has only % policies; expected read/insert/update/delete', v_policies;
+  end if;
+
+  -- Any table privilege still held by anon would bypass the intent above.
+  select count(*) into v_anon
+    from information_schema.role_table_grants
+   where table_schema = 'public' and table_name = 'hub_apps' and grantee = 'anon';
+  if v_anon > 0 then
+    raise exception 'SECURITY: anon still holds % privileges on public.hub_apps', v_anon;
+  end if;
+
+  raise notice 'Blueprint: RLS enabled, % policies, anon has no table privileges.', v_policies;
+end $$;
+
 -- Expected: 4 rows, ordered Community-DB, Community Map, Takeoff Flow,
 -- Vendor Assignments once the client's collator is applied.
 --
---   select slug, name, role_table is not null as managed, token_pool
+--   select slug, name, role_table is not null as managed, auth_kind, token_pool
 --     from public.hub_apps order by name;
 --   select * from public.hub_pending_invites();
 --   select public.hub_is_any_admin();
+--
+-- And to confirm protection independently:
+--   select relrowsecurity from pg_class where oid = 'public.hub_apps'::regclass;  -- t
+--   select policyname, cmd, roles from pg_policies where tablename = 'hub_apps';

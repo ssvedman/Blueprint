@@ -29,10 +29,9 @@ all of them.
 
 ## Repository notes
 
-- Application code sits in the repository root. Development-only files — the local
-  server, an in-memory fixture backend, and the test suites — live in `dev/` and are not
-  used by the deployed site.
-- Fixture data is entirely fictional. Please keep it that way; the test suite enforces it.
+- This repository contains production files only. The local development server,
+  fixture backend and test suites are maintained separately and are not part of a
+  deployment.
 - Operational documentation is maintained internally rather than here.
 
 ---
