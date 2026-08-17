@@ -22,6 +22,17 @@ window.APP_CONFIG = {
   SUPABASE_URL: "https://memhzqphludiruovuzwt.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lbWh6cXBobHVkaXJ1b3Z1end0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyMTI3MjUsImV4cCI6MjA5OTc4ODcyNX0.hTJBtb3WtkgY66xqzZ22GT7V4VNllxPyb4C7qXRFFVI",
 
+  /* ---- shared session -----------------------------------------------------
+     MUST match the storageKey the sibling apps pass to createClient, character
+     for character. All four sites are the same origin, so they share one
+     localStorage; the key is what decides whether they share one *session*.
+
+     Blueprint originally omitted this and got supabase-js's default key, which
+     meant it kept a separate session from the other three: signing out here left
+     them signed in, and "one sign-in covers every tool" was not actually true.
+     Change this only by changing it everywhere at once.                        */
+  AUTH_STORAGE_KEY: "lennar-vendor-portal-auth",
+
   // Sign-in is restricted to this domain.
   ALLOWED_DOMAIN: "@lennar.com",
 

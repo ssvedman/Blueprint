@@ -30,7 +30,23 @@ window.BPDB = (function () {
     if (!window.supabase) {
       throw new Error("supabase-js failed to load, so Blueprint cannot reach the database.");
     }
-    client = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+    client = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        // Same key as the sibling apps → one shared session across the suite.
+        storageKey: CFG.AUTH_STORAGE_KEY
+      }
+    });
+
+    /* Same-origin tabs get a storage event when another tab clears the session.
+       Without this, an already-open tab keeps its in-memory session and its
+       cached JWT stays valid until expiry, so it would look signed in for up to
+       an hour after you signed out elsewhere. */
+    window.addEventListener("storage", e => {
+      if (e.key === CFG.AUTH_STORAGE_KEY && !e.newValue) location.reload();
+    });
   } else if (window.BPMock) {
     client = window.BPMock.createMockClient();
   } else {
@@ -62,7 +78,17 @@ window.BPDB = (function () {
     return (data && data.session && data.session.user.email) || null;
   }
 
-  async function signOut() { await client.auth.signOut(); }
+  // scope:'global' (the v2 default, stated here so it is not lost in a refactor)
+  // revokes refresh tokens server-side, not just locally.
+  async function signOut() {
+    try {
+      await client.auth.signOut({ scope: "global" });
+    } catch (_) {
+      // Even if the revoke call fails, drop the local session so the browser is
+      // signed out rather than stuck in a half-signed-in state.
+    }
+    try { localStorage.removeItem(CFG.AUTH_STORAGE_KEY); } catch (_) {}
+  }
 
   // Blueprint is the landing page for every credential link, from any app, so
   // it must redeem both token pools. The &pool=cdb tag makes the routing
