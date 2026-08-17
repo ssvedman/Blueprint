@@ -1,4 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Vendor Assignments">
-  <rect width="64" height="64" rx="14" fill="#0057b8"/>
-  <text x="32" y="43" text-anchor="middle" font-family="'Segoe UI', system-ui, -apple-system, Arial, sans-serif" font-size="27" font-weight="700" fill="#ffffff">VA</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Vendor Assignments">
+  <rect width="48" height="48" rx="10" fill="#0a2540"/>
+  <!-- the assignment matrix: trade partners against communities -->
+  <rect x="12" y="12" width="24" height="24" rx="3" stroke="#4d92e0" stroke-width="2.4"/>
+  <path d="M20 12v24M28 12v24M12 20h24M12 28h24" stroke="#4d92e0" stroke-width="1.6"
+        stroke-linecap="round" opacity=".8"/>
+  <!-- filled cells: where a vendor is assigned -->
+  <rect x="29.5" y="13.5" width="5" height="5" rx="1" fill="#4d92e0"/>
+  <rect x="13.5" y="21.5" width="5" height="5" rx="1" fill="#0057b8"/>
+  <rect x="21.5" y="29.5" width="5" height="5" rx="1" fill="#eaf2fc"/>
 </svg>

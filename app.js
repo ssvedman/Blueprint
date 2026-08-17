@@ -282,10 +282,16 @@
   function authorHtml(app) {
     const a = BP.parseAuthors(app.authors);
     if (!a.length) return "";
+    // Chips live in their own non-wrapping track so two authors always share a
+    // line. Previously the label competed with them for the same row and pushed
+    // the second author onto its own line on anything but a wide tile.
     return '<div class="apptile-auth"><span class="lbl">' +
       (a.length > 1 ? "Authors" : "Author") + "</span>" +
-      a.map(n => '<span class="who"><span class="av">' + esc(BP.initialsOf(n)) +
-                 "</span>" + esc(n) + "</span>").join("") + "</div>";
+      '<span class="who-list">' +
+      a.map(n => '<span class="who" title="' + esc(n) + '"><span class="av">' +
+                 esc(BP.initialsOf(n)) + '</span><span class="nm">' + esc(n) +
+                 "</span></span>").join("") +
+      "</span></div>";
   }
 
   /* ------------------------------------------------------------------- APPS */
