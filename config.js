@@ -32,7 +32,10 @@ window.APP_CONFIG = {
   // Every invite and password-reset link lands here, including links minted from
   // inside the other three apps. In local mode this is overridden to the current
   // origin so links you generate are actually clickable while developing.
-  BLUEPRINT_URL: "https://ssvedman.github.io/blueprint/",
+  // Capital B: the repository is named "Blueprint", and GitHub Pages paths are
+  // case-sensitive. https://ssvedman.github.io/blueprint/ returns 404, which
+  // would have silently broken every credential link.
+  BLUEPRINT_URL: "https://ssvedman.github.io/Blueprint/",
 
   /* ---- app registry ------------------------------------------------------
      The live registry is the hub_apps table, so apps can be added at runtime
@@ -111,8 +114,13 @@ window.APP_CONFIG = {
   /* ---- contact -----------------------------------------------------------
      Rendered as the footer "Send feedback" link. Kept here rather than in the
      markup so there is one place to change or clear it — this repo is public, so
-     any real address in it is a deliberate choice. Set to "" to hide the link. */
-  FEEDBACK_EMAIL: "",
+     any real address in it is a deliberate choice. Set to "" to hide the link.
+
+     This one is deliberate: it is the maintainer's own work address, it is how
+     people report problems, and the three sibling apps already publish it in
+     their footers. The hygiene scan allows it here and only here — a real address
+     in a test fixture is still a failure. */
+  FEEDBACK_EMAIL: "stephen.svedman@lennar.com",
 
   // Local mock only: which account the dev "Sign in" button assumes.
   DEV_USER: "avery.stone@lennar.com"

@@ -98,7 +98,11 @@ group("fixtures contain no real people");
     if (r === SELF) continue;
     const isFixtureOrCode = /\.js$/.test(r);
     if (!isFixtureOrCode) continue;
-    const src = read(f);
+    let src = read(f);
+    // config.js may carry the maintainer's own address as FEEDBACK_EMAIL — that
+    // is a published contact point, not fixture data. Exempt that single line and
+    // keep scanning the rest of the file.
+    if (r === "config.js") src = src.replace(/^.*FEEDBACK_EMAIL.*$/m, "");
     for (const re of REAL_NAMES) {
       if (re.test(src)) hits.push(r + " uses a real person as data: " + re);
     }
@@ -122,6 +126,8 @@ group("fixtures contain no real people");
     "avery@lennar.com", "jordan@lennar.com", "casey@lennar.com", "morgan@lennar.com",
     "riley@lennar.com", "quinn@lennar.com",
     "one@lennar.com", "two@lennar.com", "three@lennar.com",
+    // maintainer contact, published deliberately (config.js FEEDBACK_EMAIL only)
+    "stephen.svedman@lennar.com",
     // generic placeholders in UI copy and docs
     "you@lennar.com", "name@lennar.com", "newhire@lennar.com",
     "nobody@lennar.com", "another@lennar.com", "new@lennar.com",
@@ -189,6 +195,22 @@ group("public README stays non-operational");
   // It should still explain what the thing is.
   ok(/Lennar/.test(readme) && readme.length > 400, "README still describes the tool");
   ok(readme.length < 4000, "README stays short — it is a description, not a manual");
+}
+
+group("footer contact link is wired");
+{
+  // Regression guard. FEEDBACK_EMAIL once shipped empty, and app.js removes the
+  // link rather than rendering a dead one — so the button silently vanished in
+  // production with nothing failing.
+  const cfg = read(path.join(ROOT, "config.js"));
+  const m = cfg.match(/FEEDBACK_EMAIL:\s*"([^"]*)"/);
+  ok(!!m, "config.js defines FEEDBACK_EMAIL");
+  ok(m[1].length > 0, "FEEDBACK_EMAIL is set, so the footer link renders");
+  ok(/@/.test(m[1]), "and looks like an address");
+
+  const html = read(path.join(ROOT, "index.html"));
+  ok(/id="feedbackLink"/.test(html), "index.html has the link element to populate");
+  ok(!/mailto:[^"]*@/.test(html), "and hardcodes no address in the markup");
 }
 
 group("deployed surface is minimal");
