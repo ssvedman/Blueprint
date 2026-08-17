@@ -120,6 +120,57 @@ group("auth kinds", () => {
   eq(v3.app.role_table, null, "and gets no role table");
 });
 
+group("icon discovery", () => {
+  const c = BP.iconCandidates("https://apps.lennar.com/bid-board");
+
+  ok(c.length > 20, "probes many conventional locations, not just one (" + c.length + ")");
+  eq(c[0], "https://apps.lennar.com/bid-board/logo.svg",
+     "our own convention is still tried first");
+
+  // The original bug: only logo.svg was ever tried.
+  ok(c.some(u => /favicon\.ico$/.test(u)), "includes favicon.ico");
+  ok(c.some(u => /apple-touch-icon\.png$/.test(u)), "includes apple-touch-icon.png");
+  ok(c.some(u => /favicon\.svg$/.test(u)), "includes favicon.svg");
+  ok(c.some(u => /logo\.png$/.test(u)), "includes logo.png");
+
+  // Scalable before raster, big raster before tiny favicon.
+  const idx = p => c.findIndex(u => u.endsWith("/bid-board/" + p));
+  ok(idx("logo.svg") < idx("apple-touch-icon.png"), "svg ranked above apple-touch-icon");
+  ok(idx("apple-touch-icon.png") < idx("favicon.ico"),
+     "180px apple-touch-icon ranked above a 16px favicon.ico");
+  ok(idx("favicon-32x32.png") < idx("favicon-16x16.png"), "larger favicon preferred");
+
+  // Path-level before origin-level, so a subpath app wins with its own icon.
+  ok(idx("logo.svg") < c.indexOf("https://apps.lennar.com/logo.svg"),
+     "app path is tried before the domain root");
+  ok(c.includes("https://apps.lennar.com/favicon.ico"), "domain root is still a fallback");
+
+  eq(new Set(c).size, c.length, "no duplicate candidates");
+
+  // An origin-only URL should not produce a duplicated second pass.
+  const root = BP.iconCandidates("https://x.com/");
+  eq(root.length, BP.ICON_PATHS.length, "origin-only URL probes each path once");
+
+  eq(BP.iconCandidates("not a url"), [], "invalid URL yields nothing");
+  eq(BP.iconCandidates("http://x.com/"), [], "http is rejected like everywhere else");
+
+  ok(BP.isScalableIcon("https://x.com/logo.svg"), "svg is scalable");
+  ok(BP.isScalableIcon("https://x.com/logo.svg?v=2"), "query string tolerated");
+  ok(!BP.isScalableIcon("https://x.com/favicon.ico"), "ico is not");
+
+  // bestIcon: first success in priority order, but rasters must be big enough
+  // that a tracking pixel or error image is not adopted as a logo.
+  eq(BP.bestIcon([null, { src: "a/favicon.ico", w: 32, h: 32 }]).src, "a/favicon.ico",
+     "picks the first usable result");
+  eq(BP.bestIcon([{ src: "a/logo.png", w: 1, h: 1 }, { src: "a/favicon.ico", w: 32, h: 32 }]).src,
+     "a/favicon.ico", "rejects a 1×1 pixel and falls through");
+  // An SVG with no intrinsic size reports 0×0 — it must still be accepted.
+  eq(BP.bestIcon([{ src: "a/logo.svg", w: 0, h: 0 }]).src, "a/logo.svg",
+     "a sizeless SVG is accepted rather than rejected on dimensions");
+  eq(BP.bestIcon([null, null]), null, "nothing found → null");
+  eq(BP.bestIcon([]), null, "empty → null");
+});
+
 group("authors is always an array", () => {
   // The live failure: a comma-separated string reached a Postgres text[] column
   // and produced  malformed array literal: "Denis Crepes, Stephen Svedman"

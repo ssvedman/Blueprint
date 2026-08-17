@@ -137,6 +137,79 @@
     };
   }
 
+  /* ------------------------------------------------------------ icon discovery */
+
+  /* Icon detection used to probe one path — <url>/logo.svg — which is only *our*
+     convention. Any other site with a perfectly good icon came back empty and got
+     a placeholder.
+
+     A static page cannot read another origin's HTML to find its <link rel="icon">
+     (CORS), so instead we probe a ranked list of conventional locations by trying
+     to load each as an image. That works cross-origin because image loading does
+     not require CORS.
+
+     Order matters more than it looks. Preference goes to:
+       1. scalable formats  — an SVG renders sharply at any tile size
+       2. large rasters     — apple-touch-icon is typically 180px; favicon.ico is
+                              often 16px and looks soft blown up to 40px
+       3. small favicons    — better than nothing
+     Path-level candidates come before origin-level ones: a project hosted at
+     /Bid-Board/ should win with its own icon before falling back to whatever the
+     domain root serves, which for a shared host is somebody else's brand.        */
+  const ICON_PATHS = [
+    // scalable first
+    "logo.svg", "icon.svg", "favicon.svg",
+    // large rasters, usually purpose-built for tiles and home screens
+    "apple-touch-icon.png", "apple-touch-icon-precomposed.png",
+    "android-chrome-512x512.png", "android-chrome-192x192.png",
+    "icon-512.png", "icon-192.png", "logo-512.png",
+    // ordinary logos
+    "logo.png", "icon.png", "logo.jpg",
+    // conventional favicons, smallest last
+    "favicon-96x96.png", "favicon-32x32.png", "favicon.png",
+    "favicon-16x16.png", "favicon.ico"
+  ];
+
+  // Formats whose intrinsic size we can trust. An SVG with no width/height
+  // attributes reports naturalWidth 0 in some browsers, so a size check would
+  // wrongly reject a valid icon — hence the distinction.
+  function isScalableIcon(src) {
+    return /\.svg(\?|#|$)/i.test((src || "") + "");
+  }
+
+  function iconCandidates(url) {
+    const v = validateUrl(url);
+    if (!v.ok) return [];
+    let base, origin;
+    try {
+      const u = new URL(v.url);
+      origin = u.origin + "/";
+      base = u.origin + u.pathname.replace(/[^/]*$/, "");
+      if (!base.endsWith("/")) base += "/";
+    } catch (_) { return []; }
+
+    const out = [];
+    const seen = new Set();
+    const push = p => { if (!seen.has(p)) { seen.add(p); out.push(p); } };
+
+    for (const p of ICON_PATHS) push(base + p);
+    // Only worth trying the domain root when the app lives in a subpath.
+    if (origin !== base) for (const p of ICON_PATHS) push(origin + p);
+    return out;
+  }
+
+  // Given probe results in candidate order, take the first that loaded. Rasters
+  // must be at least 16px square so a tracking pixel or an error placeholder does
+  // not get adopted as an icon.
+  function bestIcon(results) {
+    for (const r of results || []) {
+      if (!r || !r.src) continue;
+      if (isScalableIcon(r.src)) return r;
+      if ((r.w || 0) >= 16 && (r.h || 0) >= 16) return r;
+    }
+    return null;
+  }
+
   /* --------------------------------------------------------------- validation */
 
   function normalizeEmail(e) {
@@ -483,6 +556,7 @@
     collator, byName, sortApps, sortEmails,
     isManaged, managedApps, activeApps, AUTH_KINDS, authKind, authMeta,
     EDITABLE_APP_FIELDS, pickEditable, rejectedFields, slugify, removalImpact,
+    ICON_PATHS, isScalableIcon, iconCandidates, bestIcon,
     normalizeEmail, validateEmail, validateUrl, validateNewApp,
     parseAuthors, formatAuthors, initialsOf,
     mergeUsers, isAdminAnywhere, adminSlugs, explicitRoleCount, filterUsers,

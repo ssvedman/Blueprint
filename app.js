@@ -435,7 +435,8 @@
       '<div><label class="fld">Icon URL</label>' +
       '<div class="linkrow"><input type="text" id="afIcon" value="' + esc(a.icon_url || "") + '" placeholder="leave blank to auto-detect">' +
       '<button class="btn mini ghost" id="afDetect">Detect</button></div>' +
-      '<p class="hint" id="afIconNote">Blank shows a flagged placeholder rather than an invented mark.</p></div></div>' +
+      '<p class="hint" id="afIconNote">Detect checks logo.svg, favicon and apple-touch-icon ' +
+      'at both the app path and the domain root. Blank shows a generated tile.</p></div></div>' +
       '<div class="field-row"><div><label class="fld">Sign-in</label>' +
       '<select class="std" id="afAuth" style="width:100%">' +
       Object.keys(BP.AUTH_KINDS).map(k => {
@@ -471,22 +472,66 @@
     };
   }
 
-  function wireDetect() {
-    $("afDetect").onclick = () => {
-      const u = BP.validateUrl($("afUrl").value);
-      if (!u.ok) { $("afIconNote").textContent = u.error; return; }
-      const guess = u.url + "logo.svg";
+  /* Probe one candidate by trying to load it as an image. Cross-origin image
+     loading needs no CORS, which is what makes this work at all — we cannot read
+     another site's HTML to find its <link rel="icon">.
+     Resolves to null on failure or timeout; never rejects. */
+  function probeImage(src, timeoutMs) {
+    return new Promise(resolve => {
       const img = new Image();
-      img.onload = () => {
-        $("afIcon").value = guess;
-        $("afIconNote").textContent = "Found logo.svg — will load live from the app.";
+      let settled = false;
+      const done = result => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
       };
-      img.onerror = () => {
+      const timer = setTimeout(() => done(null), timeoutMs || 5000);
+      img.onload = () => done({ src, w: img.naturalWidth || 0, h: img.naturalHeight || 0 });
+      img.onerror = () => done(null);
+      img.src = src;
+    });
+  }
+
+  /* All candidates are probed in parallel, then the highest-priority success
+     wins. Sequential probing would be simpler but ~36 candidates × a timeout each
+     is unacceptably slow when a site has no icon at all; parallel keeps it to one
+     timeout total while core.js's ordering still decides which result is used. */
+  async function detectIcon(url) {
+    const candidates = BP.iconCandidates(url);
+    if (!candidates.length) return null;
+    const results = await Promise.all(candidates.map(c => probeImage(c)));
+    return BP.bestIcon(results);
+  }
+
+  function wireDetect() {
+    const btn = $("afDetect");
+    if (!btn) return;
+    btn.onclick = async () => {
+      const note = $("afIconNote");
+      const u = BP.validateUrl($("afUrl").value);
+      if (!u.ok) { note.textContent = u.error; return; }
+
+      btn.disabled = true;
+      const label = btn.textContent;
+      btn.textContent = "Looking…";
+      note.textContent = "Checking common icon locations…";
+
+      const found = await detectIcon(u.url);
+
+      btn.disabled = false;
+      btn.textContent = label;
+      if (found) {
+        $("afIcon").value = found.src;
+        const shown = found.src.replace(u.url, "").replace(/^https:\/\//, "");
+        note.textContent = "Found " + shown +
+          (BP.isScalableIcon(found.src) ? " (scalable)"
+            : found.w ? " (" + found.w + "×" + found.h + ")" : "") + ".";
+      } else {
         $("afIcon").value = "";
-        $("afIconNote").textContent =
-          "No logo.svg at that URL. A flagged placeholder will be used until one is published.";
-      };
-      img.src = guess;
+        note.textContent = "No icon found at the usual locations. Paste a direct " +
+          "image URL if you have one, or leave blank for a generated tile.";
+      }
     };
   }
 

@@ -56,8 +56,21 @@ async function launch() {
   // jsdom has no clipboard or fetch by default.
   win.navigator.clipboard = { writeText: async () => {} };
   win.fetch = async () => ({ ok: true });
+  // Configurable image stub. win.__iconServed lists URLs that "exist"; anything
+  // else errors, exactly as a missing icon would. This lets the detection tests
+  // assert which candidate is chosen rather than only that nothing crashes.
+  win.__iconServed = [];
   win.Image = class {
-    set src(_v) { setTimeout(() => this.onerror && this.onerror(), 0); }
+    set src(v) {
+      const hit = (win.__iconServed || []).find(x =>
+        typeof x === "string" ? x === v : x.url === v);
+      setTimeout(() => {
+        if (!hit) return this.onerror && this.onerror();
+        this.naturalWidth = typeof hit === "string" ? 180 : (hit.w || 180);
+        this.naturalHeight = typeof hit === "string" ? 180 : (hit.h || 180);
+        this.onload && this.onload();
+      }, 0);
+    }
   };
 
   // index.html loads the mock via document.write, which jsdom does not execute in
@@ -617,6 +630,93 @@ function tab(doc, label) {
     await sleep(120);
     click(doc.querySelector('[data-mode="manage"]'));
     await sleep(120);
+  }
+
+  group("icon detection covers sites that do not use our logo.svg");
+  {
+    click(tab(doc, "Apps"));
+    await sleep(100);
+    click(doc.querySelector('[data-mode="manage"]'));
+    await sleep(100);
+
+    // A site with no logo.svg but a perfectly good favicon.ico — the case that
+    // previously came back empty and fell through to a placeholder.
+    win.__iconServed = [{ url: "https://apps.lennar.com/plan-room/favicon.ico", w: 32, h: 32 }];
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "https://apps.lennar.com/plan-room";
+    click($(doc, "afDetect"));
+    await sleep(300);
+    eq($(doc, "afIcon").value, "https://apps.lennar.com/plan-room/favicon.ico",
+       "favicon.ico is detected");
+    ok(/Found/.test(txt($(doc, "afIconNote"))), "and reported as found");
+    ok(/32×32/.test(txt($(doc, "afIconNote"))), "with its size shown");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
+
+    // When several exist, priority order decides: svg beats apple-touch beats ico.
+    win.__iconServed = [
+      { url: "https://apps.lennar.com/bids/favicon.ico", w: 16, h: 16 },
+      { url: "https://apps.lennar.com/bids/apple-touch-icon.png", w: 180, h: 180 },
+      { url: "https://apps.lennar.com/bids/favicon.svg", w: 0, h: 0 }
+    ];
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "https://apps.lennar.com/bids";
+    click($(doc, "afDetect"));
+    await sleep(300);
+    eq($(doc, "afIcon").value, "https://apps.lennar.com/bids/favicon.svg",
+       "the scalable icon wins over both rasters");
+    ok(/scalable/.test(txt($(doc, "afIconNote"))), "and is described as scalable");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
+
+    // Only the domain root has an icon — a subpath app should still find it.
+    win.__iconServed = [{ url: "https://apps.lennar.com/apple-touch-icon.png", w: 180, h: 180 }];
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "https://apps.lennar.com/some/deep/tool";
+    click($(doc, "afDetect"));
+    await sleep(300);
+    eq($(doc, "afIcon").value, "https://apps.lennar.com/apple-touch-icon.png",
+       "falls back to the domain root when the app path has nothing");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
+
+    // A 1×1 tracking pixel must not be adopted as a logo.
+    win.__iconServed = [{ url: "https://apps.lennar.com/px/logo.png", w: 1, h: 1 }];
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "https://apps.lennar.com/px";
+    click($(doc, "afDetect"));
+    await sleep(300);
+    eq($(doc, "afIcon").value, "", "a 1×1 image is not accepted");
+    ok(/No icon found/.test(txt($(doc, "afIconNote"))), "and it says so plainly");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
+
+    // Nothing anywhere: clear message, no crash, no bogus value.
+    win.__iconServed = [];
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "https://nothing.example.com/app";
+    click($(doc, "afDetect"));
+    await sleep(300);
+    eq($(doc, "afIcon").value, "", "no icon set");
+    ok(/No icon found/.test(txt($(doc, "afIconNote"))), "explains the outcome");
+    ok(!$(doc, "afDetect").disabled, "button re-enabled after the search");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
+
+    // An invalid URL is rejected before any probing happens.
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "not-a-url";
+    click($(doc, "afDetect"));
+    await sleep(120);
+    ok(/https/.test(txt($(doc, "afIconNote"))), "invalid URL reported, no probing");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
   }
 
   group("app management: remove a MANAGED app is non-destructive");
