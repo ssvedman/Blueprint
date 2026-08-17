@@ -192,6 +192,11 @@ tbody tr:hover{background:var(--blue-050)}
 .field-row{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px}
 .field-row>div{flex:1 1 220px}
 .linkrow{display:flex;align-items:center;gap:8px}
+.iconrow{display:flex;align-items:flex-start;gap:10px}
+.iconrow-b{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.iconbtns{display:flex;gap:6px;flex-wrap:wrap}
+.iconprev{flex:0 0 auto;width:40px;height:40px;display:grid;place-items:center}
+.iconprev .ic,.iconprev .ic-ph{width:40px;height:40px}
 .linkrow input{flex:1;min-width:0;font-size:13px;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .grantgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:6px 0 4px}

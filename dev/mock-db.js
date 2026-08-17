@@ -221,7 +221,8 @@
   }
 
   function makeQuery(db, table, log) {
-    const state = { table, op: "select", filters: [], order: null, limit: null, single: null, rows: null };
+    const state = { table, op: "select", filters: [], order: null, limit: null,
+                    single: null, rows: null, count: null, head: false };
 
     function rows() {
       let r = (db[table] || []).slice();
@@ -232,6 +233,7 @@
           if (f.op === "neq") return String(v) !== String(f.val);
           if (f.op === "is") return f.val === null ? (v == null) : v === f.val;
           if (f.op === "in") return f.val.includes(v);
+          if (f.op === "notis") return f.val === null ? (v != null) : v !== f.val;
           return true;
         });
       }
@@ -252,6 +254,13 @@
       try {
         if (state.op === "select") {
           const r = rows();
+          // PostgREST returns a count separately from the rows, and with
+          // head:true returns no rows at all. Modelling that matters: a plain
+          // select is capped at 1000 rows server-side, so counting by fetching
+          // is wrong for any table that grows past it.
+          if (state.count === "exact") {
+            return { data: state.head ? null : r, count: r.length, error: null };
+          }
           if (state.single === "one") {
             if (r.length !== 1) return { data: null, error: { message: "Expected one row, got " + r.length } };
             return { data: r[0], error: null };
@@ -287,7 +296,13 @@
     }
 
     const q = {
-      select() { state.op = state.op === "select" ? "select" : state.op; return q; },
+      select(_cols, opts) {
+        state.op = state.op === "select" ? "select" : state.op;
+        if (opts && opts.count) state.count = opts.count;
+        if (opts && opts.head) state.head = true;
+        return q;
+      },
+      not(c, op, v) { state.filters.push({ col: c, op: op === "is" ? "notis" : "neq", val: v }); return q; },
       insert(r) { state.op = "insert"; state.rows = [].concat(r); return q; },
       upsert(r, o) { state.op = "upsert"; state.rows = [].concat(r); state.conflict = o && o.onConflict; return q; },
       update(r) { state.op = "update"; state.rows = [r]; return q; },

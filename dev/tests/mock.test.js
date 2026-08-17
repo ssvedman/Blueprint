@@ -318,6 +318,36 @@ const mk = () => createMockClient({ now: NOW });
        null, "non-array columns unaffected");
   });
 
+  await group("counts come from the server, not from fetched rows", async () => {
+    const sb = mk();
+    sb.__signInAs("avery.stone@lennar.com");
+
+    // A plain select is capped server-side (PostgREST defaults to 1000), so
+    // counting fetched rows under-reports on a large table and every derived
+    // figure goes with it. head+exact avoids fetching anything.
+    const head = await sb.from("flow_rows").select("*", { count: "exact", head: true });
+    eq(head.data, null, "head:true returns no rows");
+    eq(head.count, 636, "but does return the exact count");
+
+    const flagged = await sb.from("flow_rows")
+      .select("*", { count: "exact", head: true })
+      .not("missing_plans", "is", null).neq("missing_plans", "");
+    eq(flagged.count, 5, "counts only rows flagged as missing plans");
+
+    const noTrench = await sb.from("flow_rows")
+      .select("*", { count: "exact", head: true }).is("first_trench_date", null);
+    eq(noTrench.count, 3, "counts rows with no trench date");
+
+    // `complete` is nullable, so "not true" must catch false and null alike.
+    const open = await sb.from("takeoff_changes")
+      .select("*", { count: "exact", head: true }).not("complete", "is", true);
+    eq(open.count, 2, "counts incomplete changes, including any null");
+
+    const unassigned = await sb.from("pending_budget_cols")
+      .select("*", { count: "exact", head: true }).is("assigned_email", null);
+    eq(unassigned.count, 1, "counts budget columns with no assignee");
+  });
+
   await group("auth", async () => {
     const sb = mk();
     const bad = await sb.auth.signInWithPassword({ email: "nobody@lennar.com", password: "whatever" });

@@ -362,7 +362,7 @@
       "</tbody></table></div>" +
       '<div class="panel-b" style="border-top:1px solid var(--line)"><p class="hint" style="margin:0">' +
       "<b>Sign-in</b> is how people get in. <b>Roles here</b> is a different question: only apps " +
-      "using this hub's sign-in have roles Blueprint can administer. A Lennar app behind Entra ID " +
+      "using this hub's sign-in have roles Blueprint can administer. An app behind Entra ID " +
       "is fully protected, but its access is managed in Entra, so it appears as a tile only. " +
       "Any app can be removed: that deletes only the Blueprint registry row, so no role data is " +
       "touched and nobody loses access." +
@@ -432,11 +432,19 @@
       '<div class="field-row"><div><label class="fld">Authors</label>' +
       '<input type="text" id="afAuthors" value="' + esc(BP.parseAuthors(a.authors).join(", ")) + '">' +
       '<p class="hint">Comma-separated. Shown on the tile so people know who to ask.</p></div>' +
-      '<div><label class="fld">Icon URL</label>' +
-      '<div class="linkrow"><input type="text" id="afIcon" value="' + esc(a.icon_url || "") + '" placeholder="leave blank to auto-detect">' +
-      '<button class="btn mini ghost" id="afDetect">Detect</button></div>' +
-      '<p class="hint" id="afIconNote">Detect checks logo.svg, favicon and apple-touch-icon ' +
-      'at both the app path and the domain root. Blank shows a generated tile.</p></div></div>' +
+      '<div><label class="fld">Icon</label>' +
+      '<div class="iconrow">' +
+        '<div class="iconprev" id="afPrev"></div>' +
+        '<div class="iconrow-b">' +
+          '<input type="text" id="afIcon" value="' + esc(a.icon_url || "") + '" placeholder="https://… or upload">' +
+          '<div class="iconbtns">' +
+            '<button class="btn mini ghost" id="afDetect">Detect</button>' +
+            '<button class="btn mini ghost" id="afUpload">Upload…</button>' +
+            '<button class="btn mini ghost" id="afClear">Clear</button>' +
+          "</div></div></div>" +
+      '<input type="file" id="afFile" accept="image/*" class="hidden">' +
+      '<p class="hint" id="afIconNote">Detect checks the usual icon locations. ' +
+      'Apps behind sign-in redirect those to a login page, so upload the image instead.</p></div></div>' +
       '<div class="field-row"><div><label class="fld">Sign-in</label>' +
       '<select class="std" id="afAuth" style="width:100%">' +
       Object.keys(BP.AUTH_KINDS).map(k => {
@@ -467,7 +475,7 @@
       url: $("afUrl").value.trim(),
       description: $("afDesc").value.trim(),
       authors: $("afAuthors").value,
-      icon_url: $("afIcon").value.trim() || null,
+      icon_url: $("afIcon").value.trim() || null,   // validated by validateIconUrl
       auth_kind: ($("afAuth") || {}).value
     };
   }
@@ -504,9 +512,91 @@
     return BP.bestIcon(results);
   }
 
+  // Downscale to a small square and return a data URI. SVGs are kept as-is —
+  // rasterising a scalable icon to put it in a 40px tile throws away the one
+  // advantage it has.
+  function fileToIconDataUrl(file, size) {
+    return new Promise((resolve, reject) => {
+      if (!file) return reject(new Error("No file chosen."));
+      if (!/^image\//.test(file.type || "")) return reject(new Error("That is not an image file."));
+
+      if (/svg/.test(file.type)) {
+        if (file.size > BP.MAX_DATA_ICON_BYTES) return reject(new Error("That SVG is too large."));
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(new Error("Could not read that file."));
+        return r.readAsDataURL(file);
+      }
+
+      const r = new FileReader();
+      r.onerror = () => reject(new Error("Could not read that file."));
+      r.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("That image could not be decoded."));
+        img.onload = () => {
+          try {
+            const n = size || 64;
+            const c = document.createElement("canvas");
+            c.width = n; c.height = n;
+            const ctx = c.getContext("2d");
+            // contain, centred — never distort someone's logo to fit a square
+            const scale = Math.min(n / img.width, n / img.height);
+            const w = Math.max(1, Math.round(img.width * scale));
+            const h = Math.max(1, Math.round(img.height * scale));
+            ctx.drawImage(img, Math.round((n - w) / 2), Math.round((n - h) / 2), w, h);
+            const out = c.toDataURL("image/png");
+            if (out.length > BP.MAX_DATA_ICON_BYTES) {
+              return reject(new Error("That image is too large to store inline."));
+            }
+            resolve(out);
+          } catch (e) { reject(new Error("Could not process that image.")); }
+        };
+        img.src = r.result;
+      };
+      r.readAsDataURL(file);
+    });
+  }
+
+  function renderIconPreview() {
+    const box = $("afPrev");
+    if (!box) return;
+    const v = ($("afIcon").value || "").trim();
+    if (!v) {
+      box.innerHTML = '<div class="ic-ph" title="No icon — a tile will be generated">' +
+        esc(($("afName") ? shortOf({ name: $("afName").value }) : "?")) + "</div>";
+      return;
+    }
+    box.innerHTML = '<img class="ic" src="' + esc(v) + '" alt="" ' +
+      'onerror="this.parentNode.innerHTML=\'<div class=&quot;ic-ph&quot; title=&quot;This icon did not load&quot;>!</div>\'">';
+  }
+
   function wireDetect() {
     const btn = $("afDetect");
     if (!btn) return;
+
+    renderIconPreview();
+    $("afIcon").oninput = renderIconPreview;
+    $("afName") && ($("afName").oninput = renderIconPreview);
+
+    $("afClear").onclick = () => {
+      $("afIcon").value = "";
+      renderIconPreview();
+      $("afIconNote").textContent = "Cleared — a tile will be generated from the name.";
+    };
+
+    $("afUpload").onclick = () => $("afFile").click();
+    $("afFile").onchange = async () => {
+      const note = $("afIconNote");
+      try {
+        const url = await fileToIconDataUrl($("afFile").files[0], 64);
+        $("afIcon").value = url;
+        renderIconPreview();
+        note.textContent = "Image stored with the app. Works regardless of sign-in.";
+      } catch (e) {
+        note.textContent = e.message || "Could not use that image.";
+      }
+      $("afFile").value = "";
+    };
     btn.onclick = async () => {
       const note = $("afIconNote");
       const u = BP.validateUrl($("afUrl").value);
@@ -523,14 +613,19 @@
       btn.textContent = label;
       if (found) {
         $("afIcon").value = found.src;
+        renderIconPreview();
         const shown = found.src.replace(u.url, "").replace(/^https:\/\//, "");
         note.textContent = "Found " + shown +
           (BP.isScalableIcon(found.src) ? " (scalable)"
             : found.w ? " (" + found.w + "×" + found.h + ")" : "") + ".";
       } else {
-        $("afIcon").value = "";
-        note.textContent = "No icon found at the usual locations. Paste a direct " +
-          "image URL if you have one, or leave blank for a generated tile.";
+        // Two causes look identical from here, and guessing between them would be
+        // worse than naming both. An app behind sign-in redirects even
+        // /favicon.ico to a login page, which cannot be decoded as an image.
+        note.textContent = "Nothing found. Either this site publishes no icon at a " +
+          "usual location, or it requires sign-in and redirects icon requests to a " +
+          "login page — detection cannot get past that. Use Upload to store the " +
+          "image with the app instead.";
       }
     };
   }
@@ -584,6 +679,9 @@
           const u = BP.validateUrl(form.url);
           if (!u.ok) { const m = $("afMsg"); m.className = "msg err"; m.textContent = u.error; return; }
           form.url = u.url;
+          const ic = BP.validateIconUrl(form.icon_url);
+          if (!ic.ok) { const m = $("afMsg"); m.className = "msg err"; m.textContent = ic.error; return; }
+          form.icon_url = ic.url;
           const r = await DB.updateApp(app.slug, form, app);
           if (!r.ok) { const m = $("afMsg"); m.className = "msg err"; m.textContent = r.error; return; }
           Object.assign(app, r.patch);
@@ -1009,34 +1107,36 @@
     }
 
     if (app.slug === "Takeoff-Flow") {
-      const { data: flow } = await DB.client.from("flow_rows").select();
-      const rows = flow || [];
+      /* No total row count here. It invited comparison with the number the app
+         itself shows, which is per-division and filtered, so the two never
+         agreed and the tile looked wrong even when it was arithmetically right.
+         A hub-level total was not telling anyone anything they could act on.
 
-      // missing_plans is the free-text field the app's own To-Do list reads;
-      // non-empty means that row is waiting on plans.
-      const flagged = rows.filter(r => (r.missing_plans || "").trim()).length;
-      // first_trench_date drives every calculated date column, so a null is a
-      // genuine gap rather than a stylistic one.
-      const noTrench = rows.filter(r => !r.first_trench_date).length;
+         What remains are counts of things that need attention, which are
+         meaningful without a denominator. All are counted server-side: a plain
+         select is capped at 1000 rows, so counting fetched rows would quietly
+         under-report once the table outgrows that — and every derived figure
+         with it. */
+      const flagged = await DB.countExact("flow_rows",
+        q => q.not("missing_plans", "is", null).neq("missing_plans", ""));
+      const noTrench = await DB.countExact("flow_rows",
+        q => q.is("first_trench_date", null));
+      const unassigned = await DB.countExact("pending_budget_cols",
+        q => q.is("assigned_email", null));
+      // `complete` is nullable, so "not true" catches false and null alike.
+      const open = await DB.countExact("takeoff_changes",
+        q => q.not("complete", "is", true));
 
-      const { data: colData } = await DB.client.from("pending_budget_cols").select();
-      const cols = colData || [];
-      const unassigned = cols.filter(c => !(c.assigned_email || "").trim()).length;
-
-      const { data: chgData } = await DB.client.from("takeoff_changes").select();
-      const open = (chgData || []).filter(c => !c.complete).length;
-
-      const sFlag = BP.assess(flagged, H.flaggedMissingPlans);
-      const sTrench = BP.assess(noTrench, H.missingTrenchDates);
-      const sCols = BP.assess(unassigned, H.unassignedBudgetCols);
+      const sFlag = BP.assess(flagged || 0, H.flaggedMissingPlans);
+      const sTrench = BP.assess(noTrench || 0, H.missingTrenchDates);
+      const sCols = BP.assess(unassigned || 0, H.unassignedBudgetCols);
 
       const last = await DB.newest("tf_change_log", "at");
 
-      checks.push(row("Flow rows", String(rows.length)));
-      checks.push(row("Rows flagged missing plans", String(flagged), sFlag));
-      checks.push(row("Rows with no trench date", String(noTrench), sTrench));
-      checks.push(row("Open takeoff changes", String(open)));
-      checks.push(row("Budget columns with no assignee", String(unassigned), sCols));
+      checks.push(row("Rows flagged missing plans", String(flagged ?? "—"), sFlag));
+      checks.push(row("Rows with no trench date", String(noTrench ?? "—"), sTrench));
+      checks.push(row("Open takeoff changes", String(open ?? "—")));
+      checks.push(row("Budget columns with no assignee", String(unassigned ?? "—"), sCols));
       checks.push(row("Last edit", last ? BP.relativeDay(last.at) : "unknown"));
 
       if (sFlag !== "ok") alerts.push(app.name + " has " + flagged + " rows flagged as missing plans.");

@@ -44,7 +44,7 @@
 
   /* How an app authenticates. This started as a binary — either it used this
      hub's Supabase sign-in, or it was assumed public — which mislabelled any
-     Lennar app behind Entra ID as "Public · no sign-in". That is not a cosmetic
+     internal app behind Entra ID as "Public · no sign-in". That is not a cosmetic
      error: it tells the reader an internal tool is open to anyone with the link.
 
      "Managed" and "authenticated" are separate questions. An Entra app is fully
@@ -174,7 +174,8 @@
   // attributes reports naturalWidth 0 in some browsers, so a size check would
   // wrongly reject a valid icon — hence the distinction.
   function isScalableIcon(src) {
-    return /\.svg(\?|#|$)/i.test((src || "") + "");
+    const v = (src || "") + "";
+    return /\.svg(\?|#|$)/i.test(v) || /^data:image\/svg\+xml;/i.test(v);
   }
 
   function iconCandidates(url) {
@@ -196,6 +197,47 @@
     // Only worth trying the domain root when the app lives in a subpath.
     if (origin !== base) for (const p of ICON_PATHS) push(origin + p);
     return out;
+  }
+
+  /* Auth-gated apps defeat probing entirely, and no candidate list fixes it.
+     An internal app observed during development redirects EVERY path — including
+     /favicon.ico — to /login?redirect=... and returns text/html. The browser then
+     tries to decode a login page as an image and fails. Being signed in does not
+     reliably help either: the request is cross-site, so the session cookie is
+     usually withheld under third-party cookie rules.
+
+     So an icon behind sign-in has to be supplied by hand. isDataIconUrl supports
+     that: paste a URL, or drop the image file in and store it inline. A 64px icon
+     is a few KB, which is a reasonable thing to keep in a text column and removes
+     the dependency on the other site being publicly readable at all. */
+  const MAX_DATA_ICON_BYTES = 48 * 1024;
+
+  function isDataIconUrl(s) {
+    return /^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);/i.test((s || "") + "");
+  }
+
+  // Accepts an https URL or an inline data: image. Used for the icon field, which
+  // is deliberately more permissive than validateUrl.
+  function validateIconUrl(value) {
+    const v = ((value || "") + "").trim();
+    if (!v) return { ok: true, url: null };            // blank is valid → placeholder
+    if (isDataIconUrl(v)) {
+      if (v.length > MAX_DATA_ICON_BYTES) {
+        return { ok: false, error: "That image is too large to store inline. Use a smaller one." };
+      }
+      return { ok: true, url: v };
+    }
+    // A relative path is legitimate (an icon served alongside Blueprint itself),
+    // and rejecting it broke editing any app whose icon was stored that way.
+    // The rule that matters is "no other scheme": that blocks javascript: and
+    // plain http: without banning ordinary paths.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(v)) {
+      if (!/^https:/i.test(v)) {
+        return { ok: false, error: "Icon must be an https URL, a relative path, or an uploaded image." };
+      }
+      try { new URL(v); } catch (_) { return { ok: false, error: "That URL could not be parsed." }; }
+    }
+    return { ok: true, url: v };
   }
 
   // Given probe results in candidate order, take the first that loaded. Rasters
@@ -279,7 +321,7 @@
             roles: [],
             division_source: { kind: "none" },
             // A form-added app has no role table, so it cannot be `shared`.
-            // Default to Entra: an internal Lennar tool is far more likely behind
+            // Default to Entra: an internal tool is far more likely behind
             // the corporate sign-in than genuinely public, and defaulting to
             // "public" is the error that prompted this.
             auth_kind: AUTH_KINDS[(form && form.auth_kind)] && form.auth_kind !== "shared"
@@ -557,6 +599,7 @@
     isManaged, managedApps, activeApps, AUTH_KINDS, authKind, authMeta,
     EDITABLE_APP_FIELDS, pickEditable, rejectedFields, slugify, removalImpact,
     ICON_PATHS, isScalableIcon, iconCandidates, bestIcon,
+    MAX_DATA_ICON_BYTES, isDataIconUrl, validateIconUrl,
     normalizeEmail, validateEmail, validateUrl, validateNewApp,
     parseAuthors, formatAuthors, initialsOf,
     mergeUsers, isAdminAnywhere, adminSlugs, explicitRoleCount, filterUsers,

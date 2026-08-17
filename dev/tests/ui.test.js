@@ -113,7 +113,8 @@ function tab(doc, label) {
     const ids = [...new Set([...appJs.matchAll(/\$\("([A-Za-z0-9_-]+)"\)/g)].map(m => m[1]))];
     // ids created at render time live in template strings, not index.html
     const dynamic = new Set(["afName", "afUrl", "afDesc", "afAuthors", "afIcon", "afDetect",
-      "afIconNote", "afMsg", "afAuth", "afAuthNote", "pvPending", "pvRefresh",
+      "afIconNote", "afMsg", "afAuth", "afAuthNote", "afPrev", "afFile",
+      "afUpload", "afClear", "pvPending", "pvRefresh",
       "hRerun", "usAdd", "acEmail", "acLink", "acMsg", "acOut"]);
     const missing = ids.filter(id => !dynamic.has(id) && !html.includes('id="' + id + '"'));
     eq(missing, [], "no getElementById targets are missing from index.html");
@@ -416,8 +417,9 @@ function tab(doc, label) {
     const tfTxt = txt(tf);
     const db = win.BPDB.client.__db;
 
-    // Flow rows: total across BOTH divisions, not one.
-    ok(/Flow rows\s*636/.test(tfTxt), "flow rows counted across all divisions (636)");
+    // No total row count: it invited comparison with the app's own per-division,
+    // filtered number, which never matched and made the tile look wrong.
+    ok(!/Flow rows/.test(tfTxt), "no raw total row count is shown");
     ok(db.flow_rows.some(r => r.division === "tampa") &&
        db.flow_rows.some(r => r.division === "orlando"),
        "fixture really does span two divisions");
@@ -683,6 +685,54 @@ function tab(doc, label) {
     click(doc.querySelector(".modal-ov [data-x]"));
     await sleep(60);
 
+    // An auth-gated app: every path redirects to a login page, so nothing decodes
+    // as an image. The message must not imply the site has no icon.
+    win.__iconServed = [];
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afUrl").value = "https://plan-intelligence.product.lennar.com/";
+    click($(doc, "afDetect"));
+    await sleep(300);
+    {
+      const note = txt($(doc, "afIconNote"));
+      ok(/requires sign-in/.test(note), "explains that sign-in can defeat detection");
+      ok(/Upload/.test(note), "and points at the upload path that does work");
+      eq($(doc, "afIcon").value, "", "no bogus icon set");
+      ok($(doc, "afUpload"), "an Upload control exists");
+      ok($(doc, "afClear"), "and a Clear control");
+    }
+
+    // An icon supplied by hand is accepted and previewed.
+    {
+      const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+      win.__iconServed = [{ url: png, w: 64, h: 64 }];
+      $(doc, "afIcon").value = png;
+      $(doc, "afIcon").dispatchEvent(new win.Event("input", { bubbles: true }));
+      await sleep(60);
+      ok($(doc, "afPrev").querySelector("img"), "preview renders the supplied image");
+      $(doc, "afName").value = "Plan Intelligence";
+      $(doc, "afAuthors").value = "Avery Stone";
+      click(doc.querySelector(".modal-ov [data-yes]"));
+      await sleep(250);
+      const added = win.BPDB.client.__db.hub_apps.find(a => a.slug === "plan-intelligence");
+      ok(!!added, "app added");
+      eq(added.icon_url, png, "inline icon stored with the app");
+      eq(added.auth_kind, "entra", "and defaulted to Lennar sign-in");
+    }
+    click(doc.querySelector('[data-mode="manage"]'));
+    await sleep(100);
+
+    // Clear returns to a generated tile.
+    click(doc.querySelector("[data-addapp]"));
+    await sleep(80);
+    $(doc, "afIcon").value = "https://x.com/a.png";
+    click($(doc, "afClear"));
+    await sleep(60);
+    eq($(doc, "afIcon").value, "", "Clear empties the field");
+    ok($(doc, "afPrev").querySelector(".ic-ph"), "and the preview falls back to a generated tile");
+    click(doc.querySelector(".modal-ov [data-x]"));
+    await sleep(60);
+
     // A 1×1 tracking pixel must not be adopted as a logo.
     win.__iconServed = [{ url: "https://apps.lennar.com/px/logo.png", w: 1, h: 1 }];
     click(doc.querySelector("[data-addapp]"));
@@ -691,7 +741,7 @@ function tab(doc, label) {
     click($(doc, "afDetect"));
     await sleep(300);
     eq($(doc, "afIcon").value, "", "a 1×1 image is not accepted");
-    ok(/No icon found/.test(txt($(doc, "afIconNote"))), "and it says so plainly");
+    ok(/Nothing found/.test(txt($(doc, "afIconNote"))), "and it says so plainly");
     click(doc.querySelector(".modal-ov [data-x]"));
     await sleep(60);
 
@@ -703,7 +753,7 @@ function tab(doc, label) {
     click($(doc, "afDetect"));
     await sleep(300);
     eq($(doc, "afIcon").value, "", "no icon set");
-    ok(/No icon found/.test(txt($(doc, "afIconNote"))), "explains the outcome");
+    ok(/Nothing found/.test(txt($(doc, "afIconNote"))), "explains the outcome");
     ok(!$(doc, "afDetect").disabled, "button re-enabled after the search");
     click(doc.querySelector(".modal-ov [data-x]"));
     await sleep(60);
@@ -743,7 +793,8 @@ function tab(doc, label) {
     ok(!db.hub_apps.find(a => a.slug === "Vendor-Portal"), "registry row deleted");
     eq(db.app_roles.length, rolesBefore, "app_roles untouched — nobody lost access");
     eq([...doc.querySelectorAll("#view tbody tr td:nth-child(2)")].map(t => txt(t)),
-       ["Bid Board", "Community-DB", "Community Map", "Plan Library", "Takeoff Flow"],
+       ["Bid Board", "Community-DB", "Community Map", "Plan Intelligence",
+        "Plan Library", "Takeoff Flow"],
        "list updated without Vendor Assignments");
   }
 

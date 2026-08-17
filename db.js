@@ -213,6 +213,17 @@ window.BPDB = (function () {
 
   /* --------------------------------------------------------------- health */
 
+  /* Counts must come from the server, not from counting fetched rows.
+     A plain select is capped (PostgREST defaults to 1000), so a table that grows
+     past that silently reports 1000 — and any metric derived from the truncated
+     set is wrong too, without looking wrong. head:true fetches no rows at all. */
+  async function countExact(table, apply) {
+    let q = client.from(table).select("*", { count: "exact", head: true });
+    if (apply) q = apply(q);
+    const { count: n, error } = await q;
+    return error ? null : (n || 0);
+  }
+
   async function count(table, filters) {
     let q = client.from(table).select();
     for (const [col, val] of Object.entries(filters || {})) q = q.eq(col, val);
@@ -253,6 +264,6 @@ window.BPDB = (function () {
     loadApps, addApp, updateApp, removeApp,
     loadUsers, setRole, clearRole,
     divisionsFor, provision, pendingInvites,
-    count, newest, reachable, friendly
+    count, countExact, newest, reachable, friendly
   };
 })();

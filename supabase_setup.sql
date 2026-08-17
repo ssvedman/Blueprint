@@ -1,6 +1,6 @@
 /* ==========================================================================
    Blueprint — Supabase setup
-   Hub + admin console for the Lennar preconstruction tools. Shares the existing
+   Hub + admin console for the preconstruction tool suite. Shares the existing
    Supabase project with Vendor Assignments, Takeoff Flow and Community-DB.
 
    Run this whole file once in Supabase > SQL Editor. It is idempotent — safe to
@@ -25,7 +25,11 @@ create extension if not exists pgcrypto;
 create or replace function public.hub_email() returns text
   language sql stable as $$ select lower(coalesce(auth.jwt()->>'email','')) $$;
 
-create or replace function public.hub_is_lennar() returns boolean
+-- Renamed from hub_is_lennar(). Drop the old name if an earlier version of this
+-- file was already run; nothing outside this file referenced it.
+drop function if exists public.hub_is_lennar();
+
+create or replace function public.hub_is_allowed_domain() returns boolean
   language sql stable as $$ select public.hub_email() like '%@lennar.com' $$;
 
 -- True when the caller is an admin in ANY of the three apps.
@@ -89,7 +93,7 @@ create table if not exists public.hub_apps (
   -- How the app authenticates. Not the same question as whether Blueprint can
   -- manage its roles: an Entra app is fully authenticated but its access lives in
   -- Entra, so it stays out of the Users tab. Defaults to 'entra' because an
-  -- internal Lennar tool is far more likely behind the corporate sign-in than
+  -- internal tool is far more likely behind the corporate sign-in than
   -- genuinely public — and defaulting to 'none' would label it "Public".
   auth_kind    text not null default 'entra'
                  check (auth_kind in ('shared','entra','other','none')),
@@ -200,11 +204,11 @@ create trigger hub_apps_touch_trg before insert or update on public.hub_apps
 
 alter table public.hub_apps enable row level security;
 
--- Everyone signed in with a Lennar address sees the active tiles; admins see
+-- Everyone signed in on the approved domain sees the active tiles; admins see
 -- everything including deactivated apps.
 drop policy if exists hub_apps_read on public.hub_apps;
 create policy hub_apps_read on public.hub_apps for select to authenticated
-  using (public.hub_is_lennar() and (active or public.hub_is_any_admin()));
+  using (public.hub_is_allowed_domain() and (active or public.hub_is_any_admin()));
 
 drop policy if exists hub_apps_insert on public.hub_apps;
 create policy hub_apps_insert on public.hub_apps for insert to authenticated

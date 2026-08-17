@@ -1,10 +1,10 @@
 # Blueprint
 
-Internal hub for the Lennar preconstruction tools.
+Internal hub for a small suite of preconstruction and purchasing web apps.
 
-Blueprint is the front door to a small set of purchasing and preconstruction web apps.
-It shows what tools exist, who maintains each one, and — for administrators — provides a
-single place to manage who has access to what.
+Blueprint is the front door to those tools. It shows what exists, who maintains each
+one, and — for administrators — provides a single place to manage who has access to
+what.
 
 ## What it does
 
@@ -15,18 +15,17 @@ single place to manage who has access to what.
 
 ## Access
 
-Sign-in is restricted to Lennar associates. Administrative sections are visible only to
-administrators; everyone else sees the launcher.
+Sign-in is restricted to a single configured email domain. Administrative sections are
+visible only to administrators; everyone else sees the launcher.
 
-If you need access to a tool, or your access looks wrong, contact a Blueprint
-administrator.
+If you need access to a tool, or your access looks wrong, contact an administrator.
 
 ## Built with
 
 A static site — plain HTML, CSS and JavaScript, no build step and no framework — hosted
-on GitHub Pages and backed by Supabase for sign-in and data. It runs alongside three
-sibling apps and shares their design language and their sign-in, so one password works
-across all of them.
+on GitHub Pages and backed by Supabase for sign-in and data. It runs alongside sibling
+apps and shares their design language and their sign-in, so one password works across
+all of them.
 
 ## Repository notes
 
@@ -38,4 +37,4 @@ across all of them.
 
 ---
 
-Maintained by the purchasing team. Not intended for use outside Lennar.
+Internal tool. Not intended for public use.

@@ -137,7 +137,7 @@ group("fixtures contain no real people");
   for (const f of files) {
     if (rel(f) === SELF) continue;
     for (const m of read(f).matchAll(/[A-Za-z0-9._%+-]+@lennar\.com/g)) {
-      // '%@lennar.com' is the SQL LIKE pattern in hub_is_lennar(), not an address.
+      // '%@lennar.com' is the domain LIKE pattern in SQL, not an address.
       if (m[0].startsWith("%")) continue;
       found.add(m[0].toLowerCase());
     }
@@ -186,14 +186,15 @@ group("public README stays non-operational");
     [/git push|git remote|Settings → Pages|npm install/i, "deploy or setup steps"],
     [/SQL Editor|supabase_setup\.sql/i, "database setup steps"],
     [/localhost:\d+|\?live=1/i,     "local development instructions"],
-    [/supabase\.co/i,              "project URL"]
+    [/supabase\.co/i,              "project URL"],
+    [/lennar/i,                    "the company name"]
   ];
   const hits = banned.filter(([re]) => re.test(readme)).map(([, what]) => what);
   ok(hits.length === 0,
      "README contains no operational detail\n      found: " + hits.join(", "));
 
   // It should still explain what the thing is.
-  ok(/Lennar/.test(readme) && readme.length > 400, "README still describes the tool");
+  ok(/Blueprint/.test(readme) && readme.length > 400, "README still describes the tool");
   ok(readme.length < 4000, "README stays short — it is a description, not a manual");
 }
 

@@ -171,6 +171,40 @@ group("icon discovery", () => {
   eq(BP.bestIcon([]), null, "empty → null");
 });
 
+group("inline icons for auth-gated apps", () => {
+  // plan-intelligence.product.lennar.com redirects EVERY path, including
+  // /favicon.ico, to /login and returns text/html. No probe can succeed, so the
+  // icon has to be supplied directly.
+  const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+  const svg = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=";
+
+  ok(BP.isDataIconUrl(png), "png data URI recognised");
+  ok(BP.isDataIconUrl(svg), "svg data URI recognised");
+  ok(!BP.isDataIconUrl("https://x.com/a.png"), "an https URL is not a data URI");
+  ok(!BP.isDataIconUrl("data:text/html;base64,PGI+"), "non-image data URIs rejected");
+
+  eq(BP.validateIconUrl(png).url, png, "data URI accepted as an icon");
+  eq(BP.validateIconUrl("https://x.com/a.png").url, "https://x.com/a.png", "https accepted");
+  eq(BP.validateIconUrl("").url, null, "blank is valid — means generate a tile");
+  eq(BP.validateIconUrl("   ").url, null, "whitespace treated as blank");
+  ok(!BP.validateIconUrl("http://x.com/a.png").ok, "http rejected");
+  eq(BP.validateIconUrl("icons/community-db.svg").url, "icons/community-db.svg",
+     "a relative path is accepted — rejecting it broke editing existing apps");
+  eq(BP.validateIconUrl("/assets/logo.png").url, "/assets/logo.png", "root-relative accepted");
+  ok(!BP.validateIconUrl("javascript:alert(1)").ok, "javascript: rejected");
+  ok(!BP.validateIconUrl("data:text/html,<b>").ok, "non-image data URI rejected");
+
+  const huge = "data:image/png;base64," + "A".repeat(BP.MAX_DATA_ICON_BYTES);
+  const r = BP.validateIconUrl(huge);
+  ok(!r.ok && /too large/.test(r.error), "oversized inline image refused with a clear reason");
+
+  // A stored SVG data URI must still count as scalable.
+  ok(BP.isScalableIcon(svg), "svg data URI is scalable");
+  ok(!BP.isScalableIcon(png), "png data URI is not");
+  eq(BP.bestIcon([{ src: svg, w: 0, h: 0 }]).src, svg,
+     "a sizeless inline SVG is accepted, as with a hosted one");
+});
+
 group("authors is always an array", () => {
   // The live failure: a comma-separated string reached a Postgres text[] column
   // and produced  malformed array literal: "Denis Crepes, Stephen Svedman"
