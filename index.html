@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blueprint — Lennar preconstruction tools</title>
+<link rel="icon" href="logo.svg">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ========================= AUTH / RECOVER ========================= -->
+<div id="auth">
+  <div class="auth-card">
+    <div class="brand">
+      <img src="logo.svg" alt="Blueprint">
+      <h1>Blueprint <span id="demoPill" class="demo-pill hidden">LOCAL</span></h1>
+    </div>
+    <p class="auth-sub" id="authSub">Sign in with your Lennar email and password to reach your preconstruction tools.</p>
+
+    <!-- normal sign-in -->
+    <div id="stepSignin">
+      <label class="fld" for="email">Work email</label>
+      <input type="email" id="email" placeholder="you@lennar.com" autocomplete="email">
+      <label class="fld" for="password" style="margin-top:12px">Password</label>
+      <input type="password" id="password" placeholder="Your password" autocomplete="current-password">
+      <button class="btn" id="signinBtn">Sign in</button>
+    </div>
+
+    <!-- password-set, reached from a credential link (#recover=…) -->
+    <div id="stepRecover" class="hidden">
+      <label class="fld" for="newPass">Choose a password</label>
+      <input type="password" id="newPass" placeholder="At least 8 characters" autocomplete="new-password">
+      <label class="fld" for="newPass2" style="margin-top:12px">Confirm password</label>
+      <input type="password" id="newPass2" placeholder="Re-enter password" autocomplete="new-password">
+      <button class="btn" id="setPassBtn">Set password</button>
+    </div>
+
+    <div id="authMsg" class="msg"></div>
+    <p class="tiny">Access limited to Lennar associates. One sign-in covers every tool on this hub.</p>
+  </div>
+</div>
+
+<!-- ============================== APP ============================== -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="topbar-in">
+      <button class="home-logo" id="homeLogo" title="Home"><img src="logo.svg" alt="Blueprint — home"></button>
+      <span class="title">Blueprint</span>
+      <input type="text" id="globalSearch" placeholder="Search apps, people…">
+      <div class="spacer"></div>
+      <div class="topbar-actions">
+        <span class="user-chip" id="userChip"></span>
+        <button class="linkbtn" id="themeBtn">Dark</button>
+        <button class="linkbtn" id="logoutBtn">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="tabs" id="tabs"></div>
+    <div id="view"></div>
+  </main>
+
+  <footer class="site-foot">
+    <span>Blueprint</span>
+    <span class="sep">&middot;</span>
+    <a id="feedbackLink" href="#">Send feedback</a>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script src="core.js"></script>
+
+<!-- The in-memory mock is a development dependency and is not deployed: dev/ is
+     excluded from the published site. Load it only when serving from localhost
+     without ?live=1, so production never requests a file that isn't there.
+     document.write is used deliberately — it keeps the load synchronous, which
+     db.js requires, with no bundler or module loader involved. -->
+<script>
+(function () {
+  var local = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/.test(location.hostname);
+  var forcedLive = /[?&]live=1\b/.test(location.search);
+  if (local && !forcedLive) {
+    document.write('<script src="dev/mock-db.js"><\/script>');
+  }
+})();
+</script>
+
+<script src="db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

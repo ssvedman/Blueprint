@@ -1,0 +1,64 @@
+# ---- dependencies -----------------------------------------------------------
+# The app itself has none. These only appear if you install jsdom for the UI
+# tests, which the README suggests doing with --no-save.
+node_modules/
+package.json
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ---- scratch / temporary ----------------------------------------------------
+# One-off SQL, data dumps and exploratory scripts. Anything that belongs in the
+# repo long-term should have a real name and live outside these patterns.
+*.local.*
+*_scratch.*
+scratch/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.rej
+one_off_*.sql
+fix_*.sql
+add_*.sql
+seed_*.sql
+dump*.sql
+*.dump
+
+# ---- logs / test output -----------------------------------------------------
+*.log
+npm-debug.log*
+coverage/
+.nyc_output/
+
+# ---- editor / OS ------------------------------------------------------------
+.vscode/
+.idea/
+*.sublime-*
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- secrets ----------------------------------------------------------------
+# config.js IS committed on purpose: it holds only the Supabase anon key, which
+# is public by design — row-level security is the real boundary, not key secrecy,
+# and the other three apps commit the same value. But a service-role key must
+# never be committed, so anything matching these stays out.
+*service_role*
+*.secret
+.env
+.env.*
+secrets.json
+
+# ---- notes ------------------------------------------------------------------
+# NOT ignored, deliberately:
+#   supabase_setup.sql  — the schema is the source of truth and must be versioned.
+#                         The Vendor Portal's schema being unversioned is the one
+#                         real fragility in this stack; don't repeat it here.
+#   dev/                — the mock, dev server and tests. Excluded from the
+#                         deployed site (see .nojekyll note in README) but kept in
+#                         the repo, because a test suite you can't clone is not a
+#                         test suite.

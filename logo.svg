@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Blueprint">
+  <rect width="64" height="64" rx="14" fill="#0a2540"/>
+  <!-- blueprint grid -->
+  <g stroke="#1c3d5f" stroke-width="1">
+    <path d="M14 20h36M14 28h36M14 36h36M14 44h36"/>
+    <path d="M22 14v36M30 14v36M38 14v36M46 14v36"/>
+  </g>
+  <!-- floor plan outline -->
+  <path d="M15 47V24l17-9 17 9v23" fill="none" stroke="#eaf2fc" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- interior partition -->
+  <path d="M32 47V33h17" fill="none" stroke="#0057b8" stroke-width="2.6" stroke-linejoin="round"/>
+  <!-- keyed rooms -->
+  <rect x="19" y="33" width="9" height="10" fill="#0057b8" opacity=".85"/>
+  <rect x="36" y="37" width="9" height="6" fill="#eaf2fc" opacity=".9"/>
+</svg>
