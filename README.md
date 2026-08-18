@@ -11,12 +11,14 @@ what.
 - **Apps** — a launcher tile for each tool, with its description and author.
 - **Users** — administrators manage each person's access per app, including division
   scope, and issue sign-in links for new users.
-- **Health** — a read-only status view across the tools.
+- **Health** — a read-only status view across the tools, open to everyone.
 
 ## Access
 
-Sign-in is restricted to a single configured email domain. Administrative sections are
-visible only to administrators; everyone else sees the launcher.
+Sign-in is restricted to a single configured email domain. Everyone can use the
+launcher and see the status view; managing other people's access is restricted to
+administrators. The status view shows each reader only the figures they have
+visibility for, rather than showing a zero where data is hidden from them.
 
 If you need access to a tool, or your access looks wrong, contact an administrator.
 

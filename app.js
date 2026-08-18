@@ -4,7 +4,9 @@
    Three tabs: Apps · Users · Health.
    Users and Provision are merged: a person's roles, divisions and credential
    links are one concern, edited in one place.
-   Non-admins see Apps only. Ordering is alphabetical everywhere, via core.js.
+   Apps and Health are open to everyone; Users is admin-only. Health hides any
+   metric RLS would silently truncate for the viewer rather than show a wrong
+   number. Ordering is alphabetical everywhere, via core.js.
    ========================================================================== */
 (function () {
   "use strict";
@@ -192,7 +194,7 @@
   const TABS = [
     { id: "apps", label: "Apps", admin: false },
     { id: "users", label: "Users", admin: true },
-    { id: "health", label: "Health", admin: true }
+    { id: "health", label: "Health", admin: false }
   ];
 
   function renderTabs() {
@@ -1034,18 +1036,24 @@
         if (!up) alerts.push(app.name + " did not respond.");
         continue;
       }
-      const p = await healthForApp(app, H, alerts);
+      const p = await healthForApp(app, H, alerts, state.isAdmin);
       if (stale()) return;
       panels.push(p);
     }
 
-    const acct = await accountsHealth(H, alerts);
-    if (stale()) return;
-    panels.push(acct);
+    if (state.isAdmin) {
+      const acct = await accountsHealth(H, alerts);
+      if (stale()) return;
+      panels.push(acct);
+    }
 
     v.innerHTML =
       '<div class="toolbar"><button class="btn mini" id="hRerun">&#8635; Re-run checks</button>' +
       '<span class="count">' + new Date().toLocaleTimeString() + "</span></div>" +
+      (state.isAdmin ? "" :
+        '<p class="hint" style="margin:0 0 14px">Showing the checks you have visibility for. ' +
+        "Some figures — drafts awaiting publish, role counts and account status — are only " +
+        "readable by administrators, so they are left out rather than shown as zero.</p>") +
       (alerts.length
         ? '<div class="warnbox"><b>' + alerts.length + " item" + (alerts.length === 1 ? "" : "s") +
           " need attention</b><ul>" + alerts.map(a => "<li>" + esc(a) + "</li>").join("") + "</ul></div>"
@@ -1084,9 +1092,20 @@
        · "Open takeoff changes" counted every row in takeoff_changes. That table
          has no status column; it has a `complete` boolean. Completed requests were
          being reported as open. */
-  async function healthForApp(app, H, alerts) {
+  /* `full` is whether the viewer can actually see the underlying rows.
+
+     This matters more than it looks. RLS filters silently — it does not error —
+     so a viewer running the same query gets a smaller result set and no
+     indication of it. cdb_cis_read restricts non-editors to status='published',
+     which would render "Unpublished drafts: 0" to a viewer when the real answer
+     is 4. The role tables are worse: cdb_roles_read and app_roles_sel return only
+     the caller's own row, so "Explicit role rows" would read 1.
+
+     Rather than show numbers that are wrong for some readers, metrics that RLS
+     can quietly truncate are simply omitted unless the viewer can see all of it.
+     An absent row is honest; a confidently wrong one is not. */
+  async function healthForApp(app, H, alerts, full) {
     const checks = [];
-    const roleRows = await DB.count(app.role_table);
     let st = "ok";
 
     if (app.slug === "Vendor-Portal") {
@@ -1103,9 +1122,11 @@
       if (latest && latest.updated_by) {
         checks.push(row("Last uploaded by", latest.updated_by.split("@")[0]));
       }
-      checks.push(row("Change-log entries", String(await DB.count("change_log") ?? "—")));
-      checks.push(row("Rollback snapshots available", String(rollback),
-        rollback > 0 ? "ok" : "warn"));
+      if (full) {
+        checks.push(row("Change-log entries", String(await DB.count("change_log") ?? "—")));
+        checks.push(row("Rollback snapshots available", String(rollback),
+          rollback > 0 ? "ok" : "warn"));
+      }
       if (s !== "ok" && latest) {
         alerts.push(app.name + " was last updated " + BP.relativeDay(latest.updated_at) + ".");
       }
@@ -1166,20 +1187,27 @@
       const sR = BP.assess(review, H.needsReview);
 
       checks.push(row("Published communities", String(pub)));
-      checks.push(row("Unpublished drafts", String(drafts), sD));
-      checks.push(row("Flagged needs-review", String(review), sR));
-      checks.push(row("Hidden from viewers", String(inactive)));
-      checks.push(row("Last publish", days == null ? "unknown" : BP.relativeDay(lastPub.published_at), sP));
-      checks.push(row("Images stored", String(await DB.count("cdb_images") ?? "—")));
+      if (full) {
+        // Drafts, review flags and image counts are all hidden from non-editors
+        // by RLS, so they would read 0 rather than "not visible".
+        checks.push(row("Unpublished drafts", String(drafts), sD));
+        checks.push(row("Flagged needs-review", String(review), sR));
+        checks.push(row("Hidden from viewers", String(inactive)));
+        checks.push(row("Last publish", days == null ? "unknown" : BP.relativeDay(lastPub.published_at), sP));
+        checks.push(row("Images stored", String(await DB.count("cdb_images") ?? "—")));
 
-      if (sD !== "ok") alerts.push(app.name + " has " + drafts + " unpublished drafts.");
-      if (sP !== "ok" && lastPub) {
-        alerts.push(app.name + " last published " + BP.relativeDay(lastPub.published_at) + ".");
+        if (sD !== "ok") alerts.push(app.name + " has " + drafts + " unpublished drafts.");
+        if (sP !== "ok" && lastPub) {
+          alerts.push(app.name + " last published " + BP.relativeDay(lastPub.published_at) + ".");
+        }
+        st = worse(worse(worse(st, sD), sP), sR);
       }
-      st = worse(worse(worse(st, sD), sP), sR);
     }
 
-    checks.push(row("Explicit role rows", String(roleRows ?? "—")));
+    if (full) {
+      const roleRows = await DB.count(app.role_table);
+      checks.push(row("Explicit role rows", String(roleRows ?? "—")));
+    }
     return { name: app.name, state: st, checks };
   }
 
