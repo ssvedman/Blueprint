@@ -454,6 +454,41 @@ window.BPDB = (function () {
 
   /* ---- Community Map ---- */
 
+  /* Health metrics for the map. It has no role table, so it used to fall into the
+     "not managed here" branch and get reported as having a separate backend — but
+     its document is in this database and Blueprint publishes it, so there is real
+     state to check.
+
+     Reads the payload rather than counting rows, because the map is one row: the
+     whole document is a single jsonb value, so the interesting numbers are inside
+     it. That is also why this is map-shaped rather than generic — a second app
+     with a data_table would want its own reader. */
+  async function mapHealth(key) {
+    const { data, error } = await client.from("map_data")
+      .select("payload,updated_at,updated_by").eq("key", key || "orlando").maybeSingle();
+    if (error) return { ok: false, error: friendly(error) };
+    if (!data) return { ok: true, seeded: false };
+
+    const comms = (data.payload && data.payload.communities) || [];
+    const placeable = c => Number.isFinite(c.lat) && Number.isFinite(c.lon)
+                        && !(c.lat === 0 && c.lon === 0);
+    const unlocated = comms.filter(c => !placeable(c));
+
+    return {
+      ok: true, seeded: true,
+      publishedAt: data.updated_at || null,
+      publishedBy: data.updated_by || null,
+      communities: comms.length,
+      plotted: comms.length - unlocated.length,
+      unlocated: unlocated.length,
+      // Starts held back with them. Three communities sounds like housekeeping;
+      // a hundred starts missing from the map does not.
+      unlocatedStarts: unlocated.reduce(
+        (a, c) => a + (c.starts || []).reduce((x, y) => x + y, 0), 0),
+      dataStart: (data.payload && data.payload.dataStart) || null
+    };
+  }
+
   async function mapCurrent(key) {
     const { data, error } = await client.from("map_data")
       .select("payload,people,updated_at,updated_by").eq("key", key).maybeSingle();
@@ -507,6 +542,6 @@ window.BPDB = (function () {
     intakeRoles, canPublish,
     vendorCurrent, vendorPublish,
     flowExisting, flowPublish,
-    mapCurrent, mapPublish
+    mapCurrent, mapPublish, mapHealth
   };
 })();

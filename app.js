@@ -1828,17 +1828,68 @@
         if (stale()) return;
         const meta = BP.authMeta(app);
         const kind = BP.authKind(app);
+        const checks = [
+          row("Site reachable", up ? "yes" : "no", up ? "ok" : "bad"),
+          row("Sign-in", meta.label, null, kind === "shared" ? null : "external"),
+          row("Access managed in",
+              kind === "entra" ? "Microsoft Entra ID"
+                : kind === "none" ? "nothing to manage" : "the app itself")
+        ];
+
+        /* An app with no role table is not automatically an app Blueprint cannot
+           see. The Community Map has no sign-in and no roles, but its document is
+           in this database and Data Intake publishes it — so report on it rather
+           than repeating "separate backend", which stopped being true. */
+        let st = up ? "ok" : "bad";
+
+        if (BP.hasVisibleData(app)) {
+          const m = await DB.mapHealth("orlando");
+          if (stale()) return;
+
+          if (!m.ok) {
+            checks.push(row("Data", "could not read " + app.data_table, "warn"));
+            st = worse(st, "warn");
+          } else if (!m.seeded) {
+            checks.push(row("Data", "no document published yet", "warn",
+                            "seed it before publishing from Data Intake"));
+            st = worse(st, "warn");
+          } else {
+            const age = BP.daysSince(m.publishedAt);
+            const sAge = age == null ? "warn" : BP.assess(age, H.staleUploadDays);
+            const sGeo = m.unlocated ? "warn" : "ok";
+
+            checks.push(
+              row("Last published", BP.relativeDay(m.publishedAt), sAge,
+                  m.publishedBy ? m.publishedBy.split("@")[0] : null),
+              row("Communities on the map", String(m.plotted)),
+              /* Held-back communities are the metric worth surfacing: they are
+                 absent from the map, its counts and its exports, and the only
+                 thing that fixes them is somebody entering an address. Reporting
+                 the starts alongside is what makes it read as urgent rather than
+                 tidy — three communities is a shrug, a hundred starts is not. */
+              row("Awaiting a location", String(m.unlocated), sGeo,
+                  m.unlocated ? m.unlocatedStarts.toLocaleString() + " starts hidden" : null),
+              row("Rolling window from", m.dataStart || "—")
+            );
+            st = worse(worse(st, sAge), sGeo);
+
+            if (m.unlocated) {
+              alerts.push(app.name + ": " + m.unlocated + " communit" +
+                (m.unlocated === 1 ? "y is" : "ies are") + " missing coordinates, hiding " +
+                m.unlocatedStarts.toLocaleString() + " starts.");
+            }
+            if (sAge === "bad") {
+              alerts.push(app.name + " has not been published in " + age + " days.");
+            }
+          }
+        } else {
+          checks.push(row("Data", "not visible to Blueprint", null, "separate backend"));
+        }
+
         panels.push({
-          name: app.name, state: up ? "ok" : "bad",
+          name: app.name, state: st,
           tag: kind === "none" ? "public" : "not managed here",
-          checks: [
-            row("Site reachable", up ? "yes" : "no", up ? "ok" : "bad"),
-            row("Sign-in", meta.label, null, kind === "shared" ? null : "external"),
-            row("Access managed in",
-                kind === "entra" ? "Microsoft Entra ID"
-                  : kind === "none" ? "nothing to manage" : "the app itself"),
-            row("Data", "not visible to Blueprint", null, "separate backend")
-          ]
+          checks
         });
         if (!up) alerts.push(app.name + " did not respond.");
         continue;

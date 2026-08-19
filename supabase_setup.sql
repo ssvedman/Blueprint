@@ -101,6 +101,15 @@ create table if not exists public.hub_apps (
   auth_kind    text not null default 'entra'
                  check (auth_kind in ('shared','entra','other','none')),
 
+  -- Whether Blueprint can READ this app's data. A third question, separate from
+  -- both auth_kind and role_table: an app can be signed in elsewhere, have no
+  -- roles here, and still keep its data in this database. The Community Map is
+  -- exactly that — no sign-in, no role table, but its document lives in map_data
+  -- and Data Intake publishes it. Without this, Health reported "not visible to
+  -- Blueprint — separate backend", which had quietly become false.
+  -- Interpolated into a count query, so it is wiring and is NOT admin-editable.
+  data_table   text,
+
   -- wiring. null role_table = launcher-only (a tile and nothing more).
   role_table   text,
   list_rpc     text,
@@ -203,6 +212,12 @@ drop trigger if exists hub_apps_touch_trg on public.hub_apps;
 create trigger hub_apps_touch_trg before insert or update on public.hub_apps
   for each row execute function public.hub_apps_touch();
 
+/* Migration for an existing install ------------------------------------------
+   `create table if not exists` above does nothing when the table already exists,
+   so a column added later has to be added explicitly. Idempotent, so re-running
+   this file stays safe. */
+alter table public.hub_apps add column if not exists data_table text;
+
 /* RLS ---------------------------------------------------------------------- */
 
 /* RLS is the security boundary for this table. The anon key is public by design,
@@ -291,13 +306,14 @@ grant execute on function public.hub_pending_invites() to authenticated;
 
 insert into public.hub_apps
   (slug, name, url, description, icon_url, authors, active, auth_kind,
-   role_table, list_rpc, token_rpc, token_pool, roles, division_scoped_roles, division_source)
+   data_table, role_table, list_rpc, token_rpc, token_pool, roles, division_scoped_roles, division_source)
 values
   ('Vendor-Portal', 'Vendor Assignments',
    'https://ssvedman.github.io/Vendor-Portal/',
    'Division vendor assignments, coverage gaps and starts, imported from E1 exports.',
    'https://ssvedman.github.io/Vendor-Portal/logo.svg',
    array['Stephen Svedman'], true, 'shared',
+   null,
    'app_roles', 'admin_list_users', 'admin_add_or_reset', 'A',
    array['admin','editor','viewer'], array['editor'],
    '{"kind":"table","table":"app_divisions"}'::jsonb),
@@ -307,6 +323,7 @@ values
    'Editable takeoff schedule with WORKDAY date math, pending budgets and change log.',
    'https://ssvedman.github.io/Takeoff-Flow/logo.svg',
    array['Stephen Svedman'], true, 'shared',
+   null,
    'tf_app_roles', 'tf_admin_list_users', 'tf_admin_add_or_reset', 'A',
    array['admin','editor','purchasing','viewer'], array['editor','purchasing'],
    '{"kind":"config"}'::jsonb),
@@ -316,17 +333,21 @@ values
    'Community information sheets with draft/publish workflow, images and meeting notes.',
    'https://ssvedman.github.io/Community-DB/logo.svg',
    array['Denis Crepes','Stephen Svedman'], true, 'shared',
+   null,
    'cdb_app_roles', 'cdb_admin_list_users', 'cdb_admin_add_or_reset', 'B',
    array['admin','editor','viewer'], array[]::text[],
    '{"kind":"config"}'::jsonb),
 
-  -- Launcher-only: no sign-in, its own separate database, another GitHub owner,
-  -- and no logo.svg published (icon_url null → flagged placeholder in the UI).
+  -- No sign-in, so no role table and no entry in Users — but its data IS in this
+  -- database now (map_data) and Data Intake publishes it, so Health reports on it
+  -- like any other app. It used to be a fork under another owner serving two JSON
+  -- files; both of those changed.
   ('lennar-map', 'Community Map',
-   'https://grant-slater.github.io/lennar-map/',
+   'https://ssvedman.github.io/lennar-map/',
    'Orlando division community map — starts by month, trade-partner and vendor filters, utilities and municipality.',
-   null,
-   array['Grant Slater'], true, 'none',
+   'https://ssvedman.github.io/lennar-map/logo.svg',
+   array['Stephen Svedman'], true, 'none',
+   'map_data',
    null, null, null, null, array[]::text[], array[]::text[],
    '{"kind":"none"}'::jsonb)
 
@@ -336,6 +357,7 @@ on conflict (slug) do update set
   description = excluded.description,
   icon_url    = excluded.icon_url,
   authors     = excluded.authors,
+  data_table  = excluded.data_table,
   auth_kind   = excluded.auth_kind;
 
 /* ------------------------------------------------- rename cleanup --------- */

@@ -97,16 +97,22 @@ window.APP_CONFIG = {
       ] }
     },
     {
-      // Launcher-only: no sign-in, its own separate database, another GitHub
-      // owner, and no logo.svg published — icon_url null renders a flagged
-      // placeholder rather than an invented mark.
+      /* No sign-in, so no role table and no entry in Users — but Blueprint DOES
+         see its data now. The document lives in map_data in this same database
+         and Data Intake publishes it, so data_table is set and Health reports on
+         it properly instead of shrugging "separate backend".
+
+         It used to be a fork under another owner with its own storage. Both of
+         those changed; the registry describing it as third-party was left behind. */
       slug: "lennar-map", name: "Community Map",
-      url: "https://grant-slater.github.io/lennar-map/",
+      url: "https://ssvedman.github.io/lennar-map/",
       description: "Orlando division community map — starts by month, trade-partner and vendor filters, utilities and municipality.",
-      icon_url: null, authors: ["Grant Slater"], active: true, auth_kind: "none",
+      icon_url: "https://ssvedman.github.io/lennar-map/logo.svg",
+      authors: ["Stephen Svedman"], active: true, auth_kind: "none",
       role_table: null, list_rpc: null, token_rpc: null, token_pool: null,
       roles: [], division_scoped_roles: [],
-      division_source: { kind: "none" }
+      division_source: { kind: "none" },
+      data_table: "map_data"
     }
   ],
 

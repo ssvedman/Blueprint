@@ -78,6 +78,24 @@
   function isManaged(app) {
     return !!(app && app.role_table);
   }
+
+  /* Whether Blueprint can read this app's data — a THIRD question, independent of
+     the other two.
+
+     "Authenticated", "roles managed here" and "data visible here" kept getting
+     collapsed into each other, and each time the result was Health stating
+     something untrue. First it labelled an Entra app "Public · no sign-in";
+     auth_kind fixed that. Now the Community Map, which has no sign-in and so no
+     role table, was still being reported as "Data: not visible to Blueprint —
+     separate backend". That was true when its data was two JSON files in another
+     owner's repo. It stopped being true when the document moved into this
+     database and Blueprint started publishing it.
+
+     A role table says who may edit. A data table says what Blueprint can see.
+     An app can have either, both or neither. */
+  function hasVisibleData(app) {
+    return !!(app && app.data_table);
+  }
   function managedApps(apps) {
     return sortApps(apps).filter(isManaged);
   }
@@ -626,7 +644,7 @@
 
   return {
     collator, byName, sortApps, sortEmails,
-    isManaged, managedApps, activeApps, AUTH_KINDS, authKind, authMeta,
+    isManaged, hasVisibleData, managedApps, activeApps, AUTH_KINDS, authKind, authMeta,
     EDITABLE_APP_FIELDS, pickEditable, rejectedFields, slugify, removalImpact,
     shortenUrl,
     ICON_PATHS, isScalableIcon, iconCandidates, bestIcon,
