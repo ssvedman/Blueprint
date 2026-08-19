@@ -33,7 +33,10 @@ let BOOTED = false;
 function boot(urls) {
   if (BOOTED) return;
   // Order matters: ingest-core resolves SheetJS from the global at first use.
-  self.importScripts(urls.xlsx, urls.ingestCore);
+  // map-core touches no spreadsheet library at all — it takes rows — so it has no
+  // ordering requirement, but it is loaded here so the map's parses can run
+  // alongside the others off the main thread.
+  self.importScripts(urls.xlsx, urls.ingestCore, urls.mapCore);
   self.BPI.setXLSX(self.XLSX);
   BOOTED = true;
 }
@@ -123,16 +126,53 @@ self.onmessage = function (e) {
 
       if (kind === "re2") {
         const rows = self.BPI.re2Rows(wb);
-        progress(id, "grouping", 80);
+        progress(id, "grouping", 60);
         const bucket = self.BPI.bucketRE2(rows);
         // The buckets travel back to the page because the vendor payload for each
         // division is built there, against the current published payload. Rows are
         // plain objects, so structured clone handles them.
         out.re2 = { counts: bucket.counts, total: bucket.total, byCode: bucket.byCode };
+
+        /* The map wants the same rows shaped differently — community → trade →
+           vendor rather than vendor → communities. Done here rather than on the
+           page because it is another pass over 144,000 rows, and because the rows
+           are already in memory on this side. Orlando only: the map is
+           single-division.
+
+           divCounts is handed in so the wrong-file guard still works even though
+           the rows have already been filtered to one division. */
+        progress(id, "grouping", 80);
+        const mapFind = { notes: [], problems: [] };
+        const olh = bucket.byCode.OLH || [];
+        const mapRe2 = self.MAPCORE.parseRE2(olh, "OLH", mapFind, bucket.counts);
+        // Maps survive structured clone, so they cross intact.
+        out.mapRe2 = { byCommunity: mapRe2.byCommunity, nameHint: mapRe2.nameHint,
+                       notes: mapFind.notes, problems: mapFind.problems };
+
       } else if (kind === "starts") {
         out.vp = self.BPI.parseStartsVP(wb);
-        progress(id, "parsing", 70);
+        progress(id, "parsing", 60);
         out.tf = self.BPI.parseStartsTF(wb, division);
+
+        /* And a third reading of the same sheet, for the map. It differs from the
+           other two in what it keeps: one record per lot with its community id,
+           which the placeholder filter and the twelve-month aggregation then work
+           over. Only Orlando is on the map, so Tampa's log is parsed for the other
+           two destinations and skipped here.
+
+           Aggregation is deliberately NOT done here: it needs dataStart, and the
+           page owns that decision. */
+        if (division === "orlando") {
+          progress(id, "parsing", 80);
+          const X = self.XLSX;
+          const sheet = self.BPI.pickStartsSheetVP(allSheetNames).sheet;
+          const rows = X.utils.sheet_to_json(self.BPI.fixRange(wb.Sheets[sheet]), { defval: null });
+          const mapFind = { notes: [], problems: [] };
+          const parsed = self.MAPCORE.parseStarts(rows, sheet, mapFind);
+          out.mapStarts = { records: parsed.records, idName: parsed.idName,
+                            sheet, notes: mapFind.notes, problems: mapFind.problems };
+        }
+
       } else if (kind === "contacts") {
         // Parsed by the map path, which needs the raw rows rather than a shape of
         // its own; the header row is hunted there because it is below the filter

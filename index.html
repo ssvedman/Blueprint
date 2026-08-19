@@ -84,6 +84,9 @@
      class of problem this feature exists to remove. The main thread needs it for
      nothing itself; the worker imports it separately. -->
 <script src="ingest-core.js"></script>
+<!-- Shared verbatim with the Community Map repo, which builds the same document
+     from its CLI. A drift test fails if the two copies stop matching. -->
+<script src="map-core.js"></script>
 
 <!-- The in-memory mock is a development dependency and is not deployed: dev/ is
      excluded from the published site. Load it only when serving from localhost

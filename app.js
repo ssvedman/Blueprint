@@ -1050,6 +1050,7 @@
     roles: null,
     current: {},      // published payloads, keyed for diffing
     results: {},      // per-destination publish outcome
+    batch: null,      // { done, total, current } while Publish all is running
     busy: false
   };
 
@@ -1057,6 +1058,7 @@
     if (intake.worker) { intake.worker.terminate(); intake.worker = null; }
     intake.files = [];
     intake.results = {};
+    intake.batch = null;
     intake.busy = false;
   }
 
@@ -1070,7 +1072,8 @@
     const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
     w._urls = {
       xlsx: "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
-      ingestCore: base + "ingest-core.js"
+      ingestCore: base + "ingest-core.js",
+      mapCore: base + "map-core.js"
     };
     intake.worker = w;
     return w;
@@ -1180,13 +1183,16 @@
   async function intakeBuildPlan() {
     const parsed = intake.files.filter(r => r.status === "parsed");
     const re2 = parsed.find(r => r.kind === "re2");
-    const contacts = parsed.find(r => r.kind === "contacts");
+    // …Rec suffixes are the dropped FILES; the unsuffixed names inside each
+    // destination block are that file's parsed result. Confusing the two is how
+    // you end up publishing a file object.
+    const contactsRec = parsed.find(r => r.kind === "contacts");
     const startsBy = {};
     for (const r of parsed) if (r.kind === "starts" && r.division) startsBy[r.division] = r;
 
     const present = {
       re2: !!re2,
-      contacts: !!contacts,
+      contacts: !!contactsRec,
       flow: parsed.some(r => r.kind === "flow"),
       starts: Object.fromEntries(Object.keys(startsBy).map(k => [k, true]))
     };
@@ -1224,12 +1230,84 @@
       }
 
       if (t.target === "communityMap") {
-        /* The map is not published from here yet. It is still listed, and its
-           prerequisites are still evaluated, because a destination that simply
-           does not appear reads as "the map does not need this file" — which is
-           wrong, and would leave the contacts export looking like it has nowhere
-           to go. Shown and explained beats absent. */
-        t.pending = true;
+        /* The map is a merge, not a replacement: coordinates, utilities,
+           municipality and plans exist only in the published document and nothing
+           in any workbook can supply them. So the current document is an input,
+           not just something to diff against — publishing without it would erase
+           every one of those fields.
+
+           The same map-core.js the map's own CLI uses does the work, so a publish
+           from here and a publish from the command line produce the same document.
+           A drift test keeps the two copies identical. */
+        const cur = await DB.mapCurrent("orlando");
+        t.currentError = cur.ok ? null : cur.error;
+        if (!cur.ok) continue;
+
+        if (!cur.row || !cur.row.payload) {
+          t.currentError = "No map document is published yet. Seed it once with "
+                         + "tools/seed-supabase.js before publishing from here — "
+                         + "there would be nothing to merge into.";
+          continue;
+        }
+
+        const find = { notes: [], problems: [] };
+        const dataStart = MAPCORE.currentDataStart();
+        const startsAgg = startsRec.parsed.mapStarts
+          ? MAPCORE.aggregateStarts(startsRec.parsed.mapStarts.records, dataStart, find)
+          : null;
+        const idName = (startsRec.parsed.mapStarts || {}).idName || {};
+
+        // Carry the worker's findings across so nothing it noticed is lost.
+        for (const src of [startsRec.parsed.mapStarts, re2.parsed.mapRe2]) {
+          if (!src) continue;
+          find.notes.push(...(src.notes || []));
+          find.problems.push(...(src.problems || []));
+        }
+
+        /* Contacts are matched by NAME against the communities that will exist
+           after this run, so this has to happen here rather than in the worker —
+           it needs the published document. The sheet is ~50 rows, so the cost is
+           nothing. */
+        let contacts = null;
+        if (contactsRec) {
+          const names = new Set((cur.row.payload.communities || []).map(c => c.name));
+          if (startsAgg) for (const id of startsAgg.keys()) names.add(idName[id] || id);
+          try {
+            contacts = MAPCORE.parseContacts(contactsRec.parsed.rows, [...names], find);
+          } catch (err) {
+            // A malformed sheet is an expected failure, not a crash: the other
+            // destinations must still be publishable.
+            find.problems.push("contact sheet: " + err.message);
+          }
+        }
+
+        t.mapResult = MAPCORE.buildDocument({
+          data: cur.row.payload,
+          people: cur.row.people || { people: {} },
+          startsAgg, idName,
+          re2: re2.parsed.mapRe2 || null,
+          contacts, dataStart,
+          notes: find.notes, problems: find.problems
+        });
+
+        t.diff = MAPCORE.diffDocument(cur.row.payload, t.mapResult.next);
+        t.guard = {
+          blocking: t.mapResult.problems,
+          warnings: [],
+          notes: t.mapResult.notes
+        };
+        if (!contactsRec) {
+          t.guard.warnings.push("No contacts export, so construction managers are "
+            + "left exactly as they are. Everything else still updates.");
+        }
+        if (t.mapResult.needGeo.length) {
+          t.guard.warnings.push(
+            `${t.mapResult.needGeo.length} new communit${t.mapResult.needGeo.length === 1 ? "y has" : "ies have"} `
+            + "no address yet, so they are held off the map until located: "
+            + t.mapResult.needGeo.slice(0, 6).join(", ")
+            + (t.mapResult.needGeo.length > 6 ? ` and ${t.mapResult.needGeo.length - 6} more` : "")
+            + ". Set an address, then run tools/validate.js --fix.");
+        }
       }
     }
 
@@ -1331,6 +1409,8 @@
     });
     const clear = document.getElementById("intakeClear");
     if (clear) clear.onclick = () => { intakeReset(); renderIntakeBody(); };
+    const all = document.getElementById("intakePublishAll");
+    if (all) all.onclick = () => intakePublishAll();
   }
 
   function intakeFilesHtml() {
@@ -1404,8 +1484,37 @@
   function intakeTargetsHtml() {
     if (!intake.targets || !intake.targets.length) return "";
     const cards = intake.targets.map(t => intakeTargetCard(t)).join("");
+    const ready = intakePublishable();
+    const waiting = intake.targets.filter(t => !t.ready).length;
+
+    /* The bar above the cards. It exists because the whole point of this screen is
+       that one upload feeds several apps, and making you press four buttons in the
+       right order buries that. What it must not do is hide what it is about to
+       write — hence the count, and the per-destination confirmation list. */
+    let bar;
+    if (intake.batch) {
+      bar = '<div class="intake-bar"><span class="hint">Publishing ' +
+        (intake.batch.done + 1) + " of " + intake.batch.total + " — " +
+        esc(intake.batch.current) + "…</span>" +
+        '<div class="prog" style="width:180px"><div class="prog-bar" style="width:' +
+        Math.round((intake.batch.done / intake.batch.total) * 100) + '%"></div></div></div>';
+    } else if (ready.length > 1) {
+      bar = '<div class="intake-bar">' +
+        "<span><b>" + ready.length + "</b> destinations ready" +
+        (waiting ? ', <span class="hint">' + waiting + " still waiting on files</span>" : "") +
+        "</span>" +
+        '<button class="btn" id="intakePublishAll"' + (intake.busy ? " disabled" : "") +
+        ">Publish all " + ready.length + "</button></div>";
+    } else if (ready.length === 1) {
+      bar = '<div class="intake-bar"><span class="hint">One destination ready' +
+        (waiting ? ", " + waiting + " still waiting on files" : "") +
+        " — publish it from its card below.</span></div>";
+    } else {
+      bar = "";
+    }
+
     return '<div class="panel"><div class="panel-h">Destinations</div>' +
-      '<div class="panel-b" style="display:grid;gap:12px">' + cards + "</div></div>";
+      '<div class="panel-b" style="display:grid;gap:12px">' + bar + cards + "</div></div>";
   }
 
   function intakeTargetCard(t) {
@@ -1430,21 +1539,6 @@
     const roleKey = t.target === "takeoffFlow" ? "takeoffFlow"
                   : t.target === "communityMap" ? "map" : "vendorPortal";
     const mayPublish = DB.canPublish(intake.roles && intake.roles[roleKey], t.division);
-
-    if (t.pending) {
-      const files = ["the RE2 export", "the Orlando starts log"]
-        .concat(intake.present && intake.present.contacts ? ["the contacts export"] : []);
-      return '<div class="intake-card waiting"><h4>' + title + "</h4>" +
-        '<p class="hint">Everything this needs is here, but the map is not published from ' +
-        "Blueprint yet. Run its own importer with " + esc(files.join(", ")) + ":</p>" +
-        '<pre class="intake-cmd">node tools/import-workbooks.js --dry-run \\\n' +
-        "  --re2 &lt;RE2&gt;.xlsx --starts &lt;starts&gt;.xlsx" +
-        (intake.present && intake.present.contacts ? " \\\n  --contacts &lt;contacts&gt;.xlsx" : "") +
-        "\nnode tools/validate.js --fix\n" +
-        "node tools/seed-supabase.js --key &lt;SERVICE_ROLE_KEY&gt;</pre>" +
-        '<p class="hint">Read the dry run before dropping <code>--dry-run</code>: it lists new ' +
-        "communities and any it no longer sees starts for.</p></div>";
-    }
 
     if (t.currentError) {
       return '<div class="intake-card bad"><h4>' + title + "</h4>" +
@@ -1488,6 +1582,40 @@
           (t.plan.newCommunities.length > 8 ? " and " + (t.plan.newCommunities.length - 8) + " more" : "") +
           ".</p>";
       }
+    } else if (t.target === "communityMap") {
+      const r = t.mapResult;
+      const plotted = r.next.communities.filter(
+        c => Number.isFinite(c.lat) && Number.isFinite(c.lon) && !(c.lat === 0 && c.lon === 0)).length;
+      stats = intakeKpis([
+        [r.totals.communities, "Communities"],
+        [plotted, "On the map"],
+        [r.totals.starts, "Starts in window"],
+        [r.added.length, "New"]
+      ]);
+      detail = '<p class="hint">A merge, not a replacement: coordinates, utilities, municipality ' +
+               "and plans exist only in the published document and are carried across untouched. " +
+               "An import never removes a community.</p>";
+      if (t.diff) {
+        detail += '<p class="hint">Against what is published now: +' + t.diff.commsAdded +
+          " / −" + t.diff.commsRemoved + " communities, starts " +
+          t.diff.startsBefore.toLocaleString() + " → " + t.diff.startsAfter.toLocaleString() + ".</p>";
+      }
+      if (r.dormant.length) {
+        detail += '<p class="hint">' + r.dormant.length + " with no starts in this window, kept: " +
+          r.dormant.slice(0, 6).map(esc).join(", ") +
+          (r.dormant.length > 6 ? " and " + (r.dormant.length - 6) + " more" : "") + ".</p>";
+      }
+      const cov = r.coverage;
+      if (cov && cov.unmatched.length) {
+        detail += '<p class="hint">' + cov.unmatched.length + " contact-sheet entr" +
+          (cov.unmatched.length === 1 ? "y" : "ies") + " matched no community: " +
+          cov.unmatched.map(esc).join(", ") +
+          ". Add an alias in map-core.js, or ignore if not on the map yet.</p>";
+      }
+      if (cov && cov.nowStaffed.length) {
+        detail += '<p class="hint">Gained contacts: ' + cov.nowStaffed.map(esc).join(", ") +
+          " — remove from AWAITING_CONTACTS in map-core.js.</p>";
+      }
     }
 
     const notes = (t.sheetNote ? [t.sheetNote] : []).concat(
@@ -1500,15 +1628,13 @@
           '<li class="' + n.level + '">' + esc(n.text) + "</li>").join("") + "</ul>"
       : "";
 
-    const nothingToDo = t.target === "takeoffFlow" && !t.plan.fresh.length && !t.plan.updates.length;
-
     let button;
     if (!mayPublish) {
       button = '<p class="hint">You do not have publish rights for ' + esc(t.divisionLabel) +
                " in " + esc(t.label) + ", so this one is read-only for you.</p>";
     } else if (blocked) {
       button = '<p class="hint">Publishing is blocked until the problems above are resolved.</p>';
-    } else if (nothingToDo) {
+    } else if (intakeNothingToDo(t)) {
       button = '<p class="hint">Nothing to publish.</p>';
     } else {
       button = '<button class="btn" data-publish="' + t.target + '" data-division="' + t.division + '"' +
@@ -1519,55 +1645,170 @@
       "<h4>" + title + "</h4>" + stats + detail + noteHtml + button + "</div>";
   }
 
+  /* Would publishing this change anything? Re-dropping the same workbook is a
+     normal thing to do — you lose track of whether you already published — and it
+     should read as "nothing to publish" rather than offering a button that writes
+     an empty history entry. */
+  function intakeNothingToDo(t) {
+    if (t.target === "takeoffFlow") return !t.plan.fresh.length && !t.plan.updates.length;
+    if (t.target === "communityMap") {
+      const d = t.diff;
+      return !!d && !d.commsAdded && !d.commsRemoved && d.startsBefore === d.startsAfter;
+    }
+    return false;   // Vendor Assignments replaces the payload wholesale every time
+  }
+
+  // Which destinations a Publish all would actually write to, in a stable order.
+  function intakePublishable() {
+    const roleFor = t => t.target === "takeoffFlow" ? "takeoffFlow"
+                       : t.target === "communityMap" ? "map" : "vendorPortal";
+    return (intake.targets || []).filter(t =>
+      t.ready &&
+      !t.currentError &&
+      !intake.results[t.target + ":" + t.division] &&
+      !(t.guard && t.guard.blocking.length) &&
+      !intakeNothingToDo(t) &&
+      DB.canPublish(intake.roles && intake.roles[roleFor(t)], t.division));
+  }
+
   function intakeKpis(pairs) {
     return '<div class="kpis">' + pairs.map(([n, l]) =>
       '<div class="kpi"><div class="n">' + Number(n).toLocaleString() + '</div>' +
       '<div class="l">' + esc(l) + "</div></div>").join("") + "</div>";
   }
 
-  async function intakePublish(target, division) {
-    const t = (intake.targets || []).find(x => x.target === target && x.division === division);
-    if (!t || intake.busy) return;
+  // One line per destination, used in both confirmation dialogs.
+  function intakeSummaryLine(t) {
+    if (t.target === "vendorPortal") {
+      return t.diff
+        ? "replace the division — communities +" + t.diff.commsAdded + " / −" + t.diff.commsRemoved +
+          ", assignments +" + t.diff.assignmentsAdded + " / −" + t.diff.assignmentsRemoved
+        : "first publish for this division";
+    }
+    if (t.target === "takeoffFlow") {
+      return "add " + t.plan.fresh.length + " row(s), update " + t.plan.updates.length + " trench date(s)";
+    }
+    if (t.target === "communityMap") {
+      return "merge — " + t.mapResult.totals.communities + " communities, +" +
+             t.diff.commsAdded + " new, starts " + t.diff.startsBefore.toLocaleString() +
+             " → " + t.diff.startsAfter.toLocaleString();
+    }
+    return "publish";
+  }
 
-    const what = target === "vendorPortal"
-      ? "Replace all " + t.divisionLabel + " data in Vendor Assignments?\n\n" +
-        (t.diff
-          ? "Communities +" + t.diff.commsAdded + " / −" + t.diff.commsRemoved + "\n" +
-            "Assignments +" + t.diff.assignmentsAdded + " / −" + t.diff.assignmentsRemoved + "\n"
-          : "This is the first publish for the division.\n") +
-        "\nThe version being replaced is kept for rollback."
-      : "Add " + t.plan.fresh.length + " row(s) and update " + t.plan.updates.length +
-        " trench date(s) in Takeoff Flow " + t.divisionLabel + "?";
+  /* Write one destination. Returns the result rather than rendering, so the
+     single-button path and Publish all share exactly the same writes — the batch
+     is not a second implementation that could drift from the individual one. */
+  async function intakeWriteOne(t) {
+    const key = t.target + ":" + t.division;
 
-    const okGo = await confirmBox("Publish", "<p>" + esc(what).replace(/\n/g, "<br>") + "</p>",
-                                  "Publish", false);
-    if (!okGo) return;
-
-    intake.busy = true;
-    renderIntakeBody();
-
-    let res;
-    if (target === "vendorPortal") {
+    if (t.target === "vendorPortal") {
       const summary = t.diff || BPI.diffPayload(null, t.payload);
-      res = await DB.vendorPublish(division, t.payload, summary, state.email);
-      intake.results[target + ":" + division] = res.ok
+      const res = await DB.vendorPublish(t.division, t.payload, summary, state.email);
+      intake.results[key] = res.ok
         ? { ok: true, message: t.divisionLabel + " replaced — " +
               t.payload.communities.length.toLocaleString() + " communities, " +
               t.payload.vendors.length.toLocaleString() + " vendor records.",
             historyError: res.historyWritten ? null : res.historyError }
         : { ok: false, message: "Publish failed: " + res.error };
-    } else if (target === "takeoffFlow") {
-      res = await DB.flowPublish(division, t.plan.fresh, t.plan.updates, t.entry, state.email);
-      intake.results[target + ":" + division] = res.ok
+
+    } else if (t.target === "takeoffFlow") {
+      const res = await DB.flowPublish(t.division, t.plan.fresh, t.plan.updates, t.entry, state.email);
+      intake.results[key] = res.ok
         ? { ok: true, message: "Added " + res.added + " row(s) and updated " + res.updated +
               " trench date(s) in " + t.divisionLabel + ".",
             historyError: res.historyWritten ? null : res.historyError }
         : { ok: false, message: "Publish failed: " + res.error };
+
+    } else if (t.target === "communityMap") {
+      const r = t.mapResult;
+      const res = await DB.mapPublish(t.division, t.divisionLabel, r.next, r.people,
+                                      t.diff, state.email);
+      const held = r.next.communities.filter(
+        c => !Number.isFinite(c.lat) || !Number.isFinite(c.lon)).length;
+      intake.results[key] = res.ok
+        ? { ok: true, message: "Map updated — " + r.totals.communities + " communities, " +
+              r.totals.starts.toLocaleString() + " starts" +
+              (held ? ". " + held + " held off the map until located." : "."),
+            historyError: res.historyWritten ? null : res.historyError }
+        : { ok: false, message: "Publish failed: " + res.error };
     }
 
+    return intake.results[key];
+  }
+
+  async function intakePublish(target, division) {
+    const t = (intake.targets || []).find(x => x.target === target && x.division === division);
+    if (!t || intake.busy) return;
+
+    const head = t.target === "vendorPortal"
+      ? "Replace all " + t.divisionLabel + " data in Vendor Assignments?"
+      : t.target === "takeoffFlow"
+        ? "Update Takeoff Flow " + t.divisionLabel + "?"
+        : "Update the Community Map?";
+
+    const tail = t.target === "vendorPortal"
+      ? "The version being replaced is kept, so this can be rolled back."
+      : t.target === "communityMap"
+        ? "A merge — nothing is removed, and coordinates and utilities are preserved."
+        : "New rows are added; existing rows keep their manual edits.";
+
+    const okGo = await confirmBox("Publish",
+      "<p>" + esc(head) + "</p><p>" + esc(intakeSummaryLine(t)) + "</p>" +
+      '<p class="hint">' + esc(tail) + "</p>", "Publish", false);
+    if (!okGo) return;
+
+    intake.busy = true;
+    renderIntakeBody();
+    const res = await intakeWriteOne(t);
     intake.busy = false;
-    toast(intake.results[target + ":" + division].ok ? "Published." : "Publish failed.",
-          intake.results[target + ":" + division].ok ? "ok" : "err");
+    toast(res.ok ? "Published." : "Publish failed.", res.ok ? "ok" : "err");
+    renderIntakeBody();
+  }
+
+  /* Publish all.
+
+     Sequential, not parallel. Three reasons, in order of how much they matter:
+     a failure is attributable to one destination rather than to "the batch"; a
+     later destination can be skipped once an earlier one fails, if you choose to
+     stop; and four concurrent writes of a multi-megabyte payload is not kind to
+     anything in the path.
+
+     It does NOT roll back on failure, and says so before you start. No transaction
+     spans three applications, so a batch that claimed to be atomic would be lying.
+     What it does instead is report exactly which ones landed. */
+  async function intakePublishAll() {
+    if (intake.busy) return;
+    const list = intakePublishable();
+    if (!list.length) return;
+
+    const rows = list.map(t =>
+      "<li><b>" + esc(t.label) + " — " + esc(t.divisionLabel) + "</b><br>" +
+      '<span class="hint">' + esc(intakeSummaryLine(t)) + "</span></li>").join("");
+
+    const okGo = await confirmBox("Publish to " + list.length + " destinations",
+      "<p>These will be published one after another:</p>" +
+      '<ul class="intake-notes">' + rows + "</ul>" +
+      '<p class="hint">They are written independently. If one fails the others are ' +
+      "not undone — there is no transaction across separate applications — and the " +
+      "results below will show which succeeded.</p>",
+      "Publish all", false);
+    if (!okGo) return;
+
+    intake.busy = true;
+    for (let i = 0; i < list.length; i++) {
+      intake.batch = { done: i, total: list.length, current: list[i].label + " — " + list[i].divisionLabel };
+      renderIntakeBody();
+      await intakeWriteOne(list[i]);
+    }
+    intake.batch = null;
+    intake.busy = false;
+
+    const done = list.filter(t => (intake.results[t.target + ":" + t.division] || {}).ok).length;
+    toast(done === list.length
+      ? "Published to " + done + " destinations."
+      : done + " of " + list.length + " published — check the cards.",
+      done === list.length ? "ok" : "err");
     renderIntakeBody();
   }
 
