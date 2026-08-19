@@ -191,8 +191,14 @@
 
   /* -------------------------------------------------------------------- tabs */
 
+  /* Data Intake is not admin-gated here, because "admin" in Blueprint means
+     admin of a role table, and the people who publish division data are often
+     editors rather than admins. The real gate is per-destination and lives in
+     renderIntake(): each app's own role table decides, read through
+     DB.intakeRoles(), and RLS refuses anything the client lets through. */
   const TABS = [
     { id: "apps", label: "Apps", admin: false },
+    { id: "intake", label: "Data Intake", admin: false },
     { id: "users", label: "Users", admin: true },
     { id: "health", label: "Health", admin: false }
   ];
@@ -242,6 +248,7 @@
     const token = ++renderSeq;
     const stale = () => token !== renderSeq;
     if (state.tab === "apps") return renderApps(v);
+    if (state.tab === "intake") return renderIntake(v, stale);
     if (state.tab === "users") return renderUsers(v, stale);
     if (state.tab === "health") return renderHealth(v, stale);
   }
@@ -1003,6 +1010,565 @@
       '<div class="panel-b" style="border-top:1px solid var(--line)"><p class="hint" style="margin:0">' +
       "Tokens themselves are never sent to the browser — this list comes from " +
       "<code>hub_pending_invites()</code>, which does not return them.</p></div>";
+  }
+
+  /* ------------------------------------------------------------ DATA INTAKE
+
+     One drop zone for every workbook, instead of a separate upload screen per
+     app. The Starts Log feeds Vendor Assignments, Takeoff Flow and the Community
+     Map; the RE2 export feeds Vendor Assignments and the Map, and carries both
+     divisions in one file. Uploading each of those separately in each app is how
+     the apps ended up disagreeing about which communities exist.
+
+     Three things shape this screen:
+
+     · Files arrive separately. The two starts logs come from two permitting
+       managers on different days, so an incomplete drop is the normal case. A
+       destination missing an input is "waiting", never an error, and never a
+       partial publish.
+
+     · Nothing publishes without being shown first. Each destination gets its own
+       preview and its own button. One failing destination does not roll back the
+       others — there is no transaction spanning three apps, so pretending
+       otherwise would be a lie about what happened.
+
+     · The parse runs in a worker. The RE2 export takes about fifteen seconds of
+       unbreakable CPU, which on the main thread is a frozen tab.
+     ------------------------------------------------------------------------ */
+
+  const INTAKE_KINDS = {
+    starts:   { label: "Starts Log",           needsDivision: true },
+    re2:      { label: "RE2 Vendor Assignments", needsDivision: false },
+    contacts: { label: "Construction Contacts", needsDivision: false },
+    flow:     { label: "Flow of Takeoffs",     needsDivision: false },
+    unknown:  { label: "Not recognised",       needsDivision: false }
+  };
+
+  const intake = {
+    files: [],        // { id, name, size, kind, division, status, error, parsed }
+    worker: null,
+    roles: null,
+    current: {},      // published payloads, keyed for diffing
+    results: {},      // per-destination publish outcome
+    busy: false
+  };
+
+  function intakeReset() {
+    if (intake.worker) { intake.worker.terminate(); intake.worker = null; }
+    intake.files = [];
+    intake.results = {};
+    intake.busy = false;
+  }
+
+  /* The worker is built from a blob so the static site needs no separate build
+     step, and it is handed absolute URLs because a blob worker has no useful base
+     URL of its own — relative importScripts would resolve against the blob. */
+  function intakeWorker() {
+    if (intake.worker) return intake.worker;
+    const base = location.href.replace(/[^/]*$/, "");
+    const src = 'importScripts("' + base + 'ingest-worker.js");';
+    const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    w._urls = {
+      xlsx: "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+      ingestCore: base + "ingest-core.js"
+    };
+    intake.worker = w;
+    return w;
+  }
+
+  // One request/response over the worker, keyed by file id.
+  function intakeAsk(message, onProgress) {
+    const w = intakeWorker();
+    return new Promise((resolve, reject) => {
+      const handler = e => {
+        const d = e.data || {};
+        if (d.id !== message.id) return;
+        if (d.type === "progress") { if (onProgress) onProgress(d); return; }
+        w.removeEventListener("message", handler);
+        if (d.type === "error") reject(new Error(d.message));
+        else resolve(d);
+      };
+      w.addEventListener("message", handler);
+      w.postMessage(Object.assign({ urls: w._urls }, message));
+    });
+  }
+
+  async function intakeAddFiles(fileList) {
+    /* Adding a file invalidates every previous outcome message. "Added 6 rows to
+       Orlando" was true when it was written, but leaving it on the card while the
+       plan underneath has changed means the screen is describing the past and the
+       button is describing the future, in the same box. The toast already
+       confirmed the publish, and the new preview is what matters now. */
+    intake.results = {};
+
+    const incoming = [...fileList].filter(f => /\.(xlsx|xlsm)$/i.test(f.name));
+    const rejected = [...fileList].filter(f => !/\.(xlsx|xlsm)$/i.test(f.name));
+    for (const r of rejected) {
+      intake.files.push({
+        id: "f" + Math.random().toString(36).slice(2), name: r.name, size: r.size,
+        kind: "unknown", status: "error",
+        error: "Only .xlsx and .xlsm workbooks can be read."
+      });
+    }
+
+    for (const f of incoming) {
+      const rec = {
+        id: "f" + Math.random().toString(36).slice(2),
+        name: f.name, size: f.size, file: f,
+        kind: null, division: null, status: "identifying", error: null, parsed: null
+      };
+      intake.files.push(rec);
+    }
+    renderIntakeBody();
+
+    // Identify first — cheap, and it lets the UI label every file before the
+    // expensive parses begin.
+    for (const rec of intake.files.filter(r => r.status === "identifying")) {
+      try {
+        const buf = await rec.file.arrayBuffer();
+        const res = await intakeAsk({ type: "identify", id: rec.id, buffer: buf, fileName: rec.name });
+        rec.kind = res.guess.kind;
+        rec.division = res.guess.division;
+        rec.why = res.guess.why;
+        rec.sheetNames = res.sheetNames;
+        rec.status = rec.kind === "unknown" ? "unrecognised" : "ready";
+        if (rec.kind === "starts" && !rec.division) {
+          rec.status = "needs-division";
+        }
+      } catch (err) {
+        rec.status = "error";
+        rec.error = err.message;
+      }
+      renderIntakeBody();
+    }
+
+    await intakeParseAll();
+  }
+
+  async function intakeParseAll() {
+    const todo = intake.files.filter(r => r.status === "ready" && !r.parsed &&
+                                          r.kind !== "unknown" && r.kind !== "contacts");
+    // Contacts are parsed too, but only the map consumes them.
+    const all = intake.files.filter(r => r.status === "ready" && !r.parsed && r.kind !== "unknown");
+    for (const rec of all) {
+      rec.status = "parsing";
+      rec.progress = { stage: "reading", pct: 0 };
+      renderIntakeBody();
+      try {
+        const buf = await rec.file.arrayBuffer();
+        const res = await intakeAsk(
+          { type: "parse", id: rec.id, buffer: buf, kind: rec.kind, division: rec.division, fileName: rec.name },
+          p => { rec.progress = { stage: p.stage, pct: p.pct }; renderIntakeProgress(rec); }
+        );
+        rec.parsed = res;
+        rec.status = "parsed";
+        // Free the File handle: the RE2 workbook's parsed form is already large
+        // and holding the original buffer as well doubles it for no reason.
+        rec.file = null;
+      } catch (err) {
+        rec.status = "error";
+        rec.error = err.message;
+      }
+      renderIntakeBody();
+    }
+    void todo;
+    await intakeBuildPlan();
+  }
+
+  /* What is present, what each destination needs, and — for the destinations that
+     can go — what would actually change. */
+  async function intakeBuildPlan() {
+    const parsed = intake.files.filter(r => r.status === "parsed");
+    const re2 = parsed.find(r => r.kind === "re2");
+    const contacts = parsed.find(r => r.kind === "contacts");
+    const startsBy = {};
+    for (const r of parsed) if (r.kind === "starts" && r.division) startsBy[r.division] = r;
+
+    const present = {
+      re2: !!re2,
+      contacts: !!contacts,
+      flow: parsed.some(r => r.kind === "flow"),
+      starts: Object.fromEntries(Object.keys(startsBy).map(k => [k, true]))
+    };
+
+    const targets = BPI.planTargets(present);
+
+    for (const t of targets) {
+      if (!t.ready) continue;
+      const startsRec = startsBy[t.division];
+
+      if (t.target === "vendorPortal") {
+        const code = BPI.divisionByKey(t.division).code;
+        const cur = await DB.vendorCurrent(t.division);
+        t.currentPayload = cur.ok ? cur.payload : null;
+        t.currentError = cur.ok ? null : cur.error;
+
+        t.payload = BPI.buildVendorPayload(
+          t.division, re2.parsed.re2.byCode[code], startsRec.parsed.vp, t.currentPayload);
+        t.diff = t.currentPayload ? BPI.diffPayload(t.currentPayload, t.payload) : null;
+        t.guard = BPI.guardVendorPayload(
+          t.payload, t.currentPayload, t.payload._diag, code, re2.parsed.re2.counts);
+        t.sheetNote = BPI.sheetDisagreement(
+          startsRec.parsed.vp.sheet, startsRec.parsed.tf.sheet, startsRec.parsed.vp.via);
+      }
+
+      if (t.target === "takeoffFlow") {
+        const ex = await DB.flowExisting(t.division);
+        t.currentError = ex.ok ? null : ex.error;
+        t.plan = BPI.planFlowImport(startsRec.parsed.tf.rows, ex.rows);
+        t.entry = BPI.flowChangeEntry(t.plan, t.division, "Starts Log");
+        t.guard = { blocking: [], warnings: [], notes: [] };
+        if (!t.plan.fresh.length && !t.plan.updates.length) {
+          t.guard.notes.push("Nothing new in this log — every combination is already in the grid.");
+        }
+      }
+
+      if (t.target === "communityMap") {
+        /* The map is not published from here yet. It is still listed, and its
+           prerequisites are still evaluated, because a destination that simply
+           does not appear reads as "the map does not need this file" — which is
+           wrong, and would leave the contacts export looking like it has nowhere
+           to go. Shown and explained beats absent. */
+        t.pending = true;
+      }
+    }
+
+    intake.targets = targets;
+    intake.present = present;
+    renderIntakeBody();
+  }
+
+  /* ------------------------------------------------------------- intake UI */
+
+  function fmtBytes(n) {
+    if (n == null) return "";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+
+  async function renderIntake(v, stale) {
+    stale = stale || (() => false);
+    v.innerHTML =
+      '<div class="panel"><div class="panel-h">Data Intake</div>' +
+      '<div class="panel-b"><p class="hint" style="margin:0">Checking what you can publish…</p></div></div>';
+
+    if (!intake.roles) {
+      intake.roles = await DB.intakeRoles(state.email);
+    }
+    if (stale()) return;
+
+    v.innerHTML =
+      '<div class="panel">' +
+        '<div class="panel-h">Data Intake</div>' +
+        '<div class="panel-b">' +
+          '<p class="hint" style="margin:0 0 10px">' +
+            "Drop the workbooks as they arrive — the Starts Log from each division's permitting " +
+            "manager, the RE2 export from E1, the contacts export from Power BI. Each file is " +
+            "recognised on its own, and each destination publishes only once everything it needs " +
+            "is here. Nothing is written until you press a Publish button." +
+          "</p>" +
+          '<div id="intakeDrop" class="uptile" tabindex="0" role="button" ' +
+               'aria-label="Add workbooks">' +
+            '<div class="uptile-ic">&#8595;</div>' +
+            '<div class="uptile-t">Drop workbooks here, or click to browse</div>' +
+            '<div class="uptile-s">.xlsx and .xlsm — several at once is fine</div>' +
+          "</div>" +
+          '<input type="file" id="intakeInput" accept=".xlsx,.xlsm" multiple class="hidden">' +
+        "</div>" +
+      "</div>" +
+      '<div id="intakeBody"></div>';
+
+    const drop = $("intakeDrop"), input = $("intakeInput");
+    const open = () => input.click();
+    drop.onclick = open;
+    drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+    ["dragenter", "dragover"].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); }));
+    ["dragleave", "dragend", "drop"].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("drag"); }));
+    drop.addEventListener("drop", e => {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        intakeAddFiles(e.dataTransfer.files);
+      }
+    });
+    input.onchange = () => { if (input.files.length) intakeAddFiles(input.files); input.value = ""; };
+
+    renderIntakeBody();
+  }
+
+  function renderIntakeProgress(rec) {
+    const el = document.getElementById("prog-" + rec.id);
+    if (el && rec.progress) {
+      el.style.width = rec.progress.pct + "%";
+      const lbl = document.getElementById("proglbl-" + rec.id);
+      if (lbl) lbl.textContent = rec.progress.stage + "…";
+    }
+  }
+
+  function renderIntakeBody() {
+    const body = $("intakeBody");
+    if (!body) return;
+    body.innerHTML = intakeFilesHtml() + intakeTargetsHtml();
+    body.querySelectorAll("[data-remove]").forEach(b => {
+      b.onclick = () => {
+        intake.files = intake.files.filter(f => f.id !== b.dataset.remove);
+        intakeBuildPlan();
+      };
+    });
+    body.querySelectorAll("[data-setdiv]").forEach(sel => {
+      sel.onchange = async () => {
+        const rec = intake.files.find(f => f.id === sel.dataset.setdiv);
+        if (!rec) return;
+        rec.division = sel.value || null;
+        rec.status = rec.division ? "ready" : "needs-division";
+        rec.parsed = null;
+        await intakeParseAll();
+      };
+    });
+    body.querySelectorAll("[data-publish]").forEach(b => {
+      b.onclick = () => intakePublish(b.dataset.publish, b.dataset.division);
+    });
+    const clear = document.getElementById("intakeClear");
+    if (clear) clear.onclick = () => { intakeReset(); renderIntakeBody(); };
+  }
+
+  function intakeFilesHtml() {
+    if (!intake.files.length) return "";
+    const rows = intake.files.map(f => {
+      const kind = INTAKE_KINDS[f.kind] || INTAKE_KINDS.unknown;
+      let statusCell;
+      if (f.status === "identifying") statusCell = '<span class="hint">Identifying…</span>';
+      else if (f.status === "parsing") {
+        statusCell =
+          '<div class="prog"><div class="prog-bar" id="prog-' + f.id + '" style="width:' +
+          ((f.progress && f.progress.pct) || 0) + '%"></div></div>' +
+          '<span class="hint" id="proglbl-' + f.id + '">' +
+          esc((f.progress && f.progress.stage) || "reading") + "…</span>";
+      } else if (f.status === "error") {
+        statusCell = '<span class="pill bad">Could not read</span> <span class="hint">' + esc(f.error) + "</span>";
+      } else if (f.status === "unrecognised") {
+        // Naming what it looked for beats "unrecognised file", which leaves the
+        // reader with nothing to check.
+        statusCell = '<span class="pill warn">Not recognised</span> <span class="hint">' +
+          esc(f.why || "") + ". Expected a Starts Log, the RE2 export, the contacts export, " +
+          "or the Flow of Takeoffs workbook.</span>";
+      } else if (f.status === "needs-division") {
+        statusCell = '<span class="pill warn">Which division?</span>';
+      } else if (f.status === "parsed") {
+        statusCell = '<span class="pill ok">Read</span> <span class="hint">' + esc(intakeFileSummary(f)) + "</span>";
+      } else {
+        statusCell = '<span class="hint">Queued</span>';
+      }
+
+      const divCell = (f.kind === "starts")
+        ? '<select data-setdiv="' + f.id + '">' +
+            '<option value=""' + (f.division ? "" : " selected") + ">Choose…</option>" +
+            BPI.DIVISIONS.map(d => '<option value="' + d.key + '"' +
+              (f.division === d.key ? " selected" : "") + ">" + esc(d.label) + "</option>").join("") +
+          "</select>"
+        : "<span class=\"hint\">—</span>";
+
+      return "<tr>" +
+        "<td><b>" + esc(f.name) + "</b><br><span class=\"hint\">" + fmtBytes(f.size) + "</span></td>" +
+        "<td>" + esc(kind.label) + "</td>" +
+        "<td>" + divCell + "</td>" +
+        "<td>" + statusCell + "</td>" +
+        '<td><button class="linkbtn" data-remove="' + f.id + '">Remove</button></td>' +
+        "</tr>";
+    }).join("");
+
+    return '<div class="panel"><div class="panel-h">Files ' +
+      '<button class="linkbtn" id="intakeClear" style="float:right">Clear all</button></div>' +
+      '<div class="table-wrap"><table><thead><tr>' +
+      "<th>File</th><th>Recognised as</th><th>Division</th><th>Status</th><th></th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table></div></div>";
+  }
+
+  function intakeFileSummary(f) {
+    const p = f.parsed || {};
+    if (f.kind === "re2" && p.re2) {
+      return p.re2.total.toLocaleString() + " rows · " +
+        Object.entries(p.re2.counts).map(([c, n]) => n.toLocaleString() + " " + c).join(", ");
+    }
+    if (f.kind === "starts" && p.vp) {
+      return 'sheet "' + p.vp.sheet + '" · ' + p.vp.sourceRows.toLocaleString() + " rows · " +
+        p.vp.startRecords.length.toLocaleString() + " start records · " +
+        p.tf.rows.length.toLocaleString() + " plan/elevation combinations";
+    }
+    if (f.kind === "contacts" && p.rows) return p.rows.length + " rows";
+    if (f.kind === "flow" && p.flowRowsRaw) return p.flowRowsRaw.length + " rows";
+    return "";
+  }
+
+  function intakeTargetsHtml() {
+    if (!intake.targets || !intake.targets.length) return "";
+    const cards = intake.targets.map(t => intakeTargetCard(t)).join("");
+    return '<div class="panel"><div class="panel-h">Destinations</div>' +
+      '<div class="panel-b" style="display:grid;gap:12px">' + cards + "</div></div>";
+  }
+
+  function intakeTargetCard(t) {
+    const title = esc(t.label) + " — " + esc(t.divisionLabel);
+    const result = intake.results[t.target + ":" + t.division];
+
+    if (result) {
+      return '<div class="intake-card ' + (result.ok ? "ok" : "bad") + '">' +
+        "<h4>" + title + "</h4><p>" + esc(result.message) + "</p>" +
+        (result.historyError
+          ? '<p class="hint">Published, but the history entry failed: ' + esc(result.historyError) +
+            ". The data is live; What's New will not show this import.</p>"
+          : "") +
+        "</div>";
+    }
+
+    if (!t.ready) {
+      return '<div class="intake-card waiting"><h4>' + title + "</h4>" +
+        '<p class="hint">Waiting for ' + t.missing.map(esc).join(" and ") + ".</p></div>";
+    }
+
+    const roleKey = t.target === "takeoffFlow" ? "takeoffFlow"
+                  : t.target === "communityMap" ? "map" : "vendorPortal";
+    const mayPublish = DB.canPublish(intake.roles && intake.roles[roleKey], t.division);
+
+    if (t.pending) {
+      const files = ["the RE2 export", "the Orlando starts log"]
+        .concat(intake.present && intake.present.contacts ? ["the contacts export"] : []);
+      return '<div class="intake-card waiting"><h4>' + title + "</h4>" +
+        '<p class="hint">Everything this needs is here, but the map is not published from ' +
+        "Blueprint yet. Run its own importer with " + esc(files.join(", ")) + ":</p>" +
+        '<pre class="intake-cmd">node tools/import-workbooks.js --dry-run \\\n' +
+        "  --re2 &lt;RE2&gt;.xlsx --starts &lt;starts&gt;.xlsx" +
+        (intake.present && intake.present.contacts ? " \\\n  --contacts &lt;contacts&gt;.xlsx" : "") +
+        "\nnode tools/validate.js --fix\n" +
+        "node tools/seed-supabase.js --key &lt;SERVICE_ROLE_KEY&gt;</pre>" +
+        '<p class="hint">Read the dry run before dropping <code>--dry-run</code>: it lists new ' +
+        "communities and any it no longer sees starts for.</p></div>";
+    }
+
+    if (t.currentError) {
+      return '<div class="intake-card bad"><h4>' + title + "</h4>" +
+        '<p>Could not read what is currently published: ' + esc(t.currentError) + "</p>" +
+        '<p class="hint">Nothing can be previewed or published until that succeeds — publishing ' +
+        "blind would overwrite data without knowing what it replaces.</p></div>";
+    }
+
+    const g = t.guard || { blocking: [], warnings: [], notes: [] };
+    const blocked = g.blocking.length > 0;
+
+    let stats = "", detail = "";
+    if (t.target === "vendorPortal") {
+      const assign = t.payload.vendors.reduce((s, v) => s + v.assigned.length, 0);
+      stats = intakeKpis([
+        [t.payload.communities.length, "Communities"],
+        [new Set(t.payload.vendors.map(v => v.name)).size, "Trade partners"],
+        [t.payload.categories.length, "Categories"],
+        [assign, "Assignments"]
+      ]);
+      detail = t.diff
+        ? '<p class="hint">Against what is published now: ' +
+            "+" + t.diff.commsAdded + " / −" + t.diff.commsRemoved + " communities, " +
+            "+" + t.diff.assignmentsAdded + " / −" + t.diff.assignmentsRemoved + " assignments, " +
+            "+" + t.diff.vendorsAdded + " / −" + t.diff.vendorsRemoved + " vendors.</p>"
+        : '<p class="hint">Nothing is published for this division yet, so there is nothing to compare against.</p>';
+      detail += '<p class="hint">Publishing replaces the whole division. The version it replaces ' +
+                "is kept, so it can be rolled back from Vendor Assignments.</p>";
+    } else if (t.target === "takeoffFlow") {
+      stats = intakeKpis([
+        [t.plan.fresh.length, "New rows"],
+        [t.plan.updates.length, "Trench updates"],
+        [t.plan.newCommunities.length, "New communities"],
+        [t.plan.parsed, "Parsed"]
+      ]);
+      detail = '<p class="hint">Existing rows keep their manual edits — only a First Trench date ' +
+               "that moved earlier is changed.</p>";
+      if (t.plan.newCommunities.length) {
+        detail += '<p class="hint">New: ' +
+          t.plan.newCommunities.slice(0, 8).map(esc).join(", ") +
+          (t.plan.newCommunities.length > 8 ? " and " + (t.plan.newCommunities.length - 8) + " more" : "") +
+          ".</p>";
+      }
+    }
+
+    const notes = (t.sheetNote ? [t.sheetNote] : []).concat(
+      g.notes.map(n => ({ level: "note", text: n })),
+      g.warnings.map(n => ({ level: "warn", text: n })),
+      g.blocking.map(n => ({ level: "bad", text: n }))
+    );
+    const noteHtml = notes.length
+      ? '<ul class="intake-notes">' + notes.map(n =>
+          '<li class="' + n.level + '">' + esc(n.text) + "</li>").join("") + "</ul>"
+      : "";
+
+    const nothingToDo = t.target === "takeoffFlow" && !t.plan.fresh.length && !t.plan.updates.length;
+
+    let button;
+    if (!mayPublish) {
+      button = '<p class="hint">You do not have publish rights for ' + esc(t.divisionLabel) +
+               " in " + esc(t.label) + ", so this one is read-only for you.</p>";
+    } else if (blocked) {
+      button = '<p class="hint">Publishing is blocked until the problems above are resolved.</p>';
+    } else if (nothingToDo) {
+      button = '<p class="hint">Nothing to publish.</p>';
+    } else {
+      button = '<button class="btn" data-publish="' + t.target + '" data-division="' + t.division + '"' +
+               (intake.busy ? " disabled" : "") + ">Publish to " + esc(t.label) + "</button>";
+    }
+
+    return '<div class="intake-card' + (blocked ? " bad" : "") + '">' +
+      "<h4>" + title + "</h4>" + stats + detail + noteHtml + button + "</div>";
+  }
+
+  function intakeKpis(pairs) {
+    return '<div class="kpis">' + pairs.map(([n, l]) =>
+      '<div class="kpi"><div class="n">' + Number(n).toLocaleString() + '</div>' +
+      '<div class="l">' + esc(l) + "</div></div>").join("") + "</div>";
+  }
+
+  async function intakePublish(target, division) {
+    const t = (intake.targets || []).find(x => x.target === target && x.division === division);
+    if (!t || intake.busy) return;
+
+    const what = target === "vendorPortal"
+      ? "Replace all " + t.divisionLabel + " data in Vendor Assignments?\n\n" +
+        (t.diff
+          ? "Communities +" + t.diff.commsAdded + " / −" + t.diff.commsRemoved + "\n" +
+            "Assignments +" + t.diff.assignmentsAdded + " / −" + t.diff.assignmentsRemoved + "\n"
+          : "This is the first publish for the division.\n") +
+        "\nThe version being replaced is kept for rollback."
+      : "Add " + t.plan.fresh.length + " row(s) and update " + t.plan.updates.length +
+        " trench date(s) in Takeoff Flow " + t.divisionLabel + "?";
+
+    const okGo = await confirmBox("Publish", "<p>" + esc(what).replace(/\n/g, "<br>") + "</p>",
+                                  "Publish", false);
+    if (!okGo) return;
+
+    intake.busy = true;
+    renderIntakeBody();
+
+    let res;
+    if (target === "vendorPortal") {
+      const summary = t.diff || BPI.diffPayload(null, t.payload);
+      res = await DB.vendorPublish(division, t.payload, summary, state.email);
+      intake.results[target + ":" + division] = res.ok
+        ? { ok: true, message: t.divisionLabel + " replaced — " +
+              t.payload.communities.length.toLocaleString() + " communities, " +
+              t.payload.vendors.length.toLocaleString() + " vendor records.",
+            historyError: res.historyWritten ? null : res.historyError }
+        : { ok: false, message: "Publish failed: " + res.error };
+    } else if (target === "takeoffFlow") {
+      res = await DB.flowPublish(division, t.plan.fresh, t.plan.updates, t.entry, state.email);
+      intake.results[target + ":" + division] = res.ok
+        ? { ok: true, message: "Added " + res.added + " row(s) and updated " + res.updated +
+              " trench date(s) in " + t.divisionLabel + ".",
+            historyError: res.historyWritten ? null : res.historyError }
+        : { ok: false, message: "Publish failed: " + res.error };
+    }
+
+    intake.busy = false;
+    toast(intake.results[target + ":" + division].ok ? "Published." : "Publish failed.",
+          intake.results[target + ":" + division].ok ? "ok" : "err");
+    renderIntakeBody();
   }
 
   /* ----------------------------------------------------------------- HEALTH */

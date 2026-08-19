@@ -272,6 +272,219 @@ window.BPDB = (function () {
     } catch (_) { return false; }
   }
 
+  /* --------------------------------------------------------------- intake
+
+     Writers for the Data Intake tab. Each one reproduces exactly what the owning
+     app writes when you upload to it directly — same tables, same columns, same
+     history rows. That is the whole contract: intake changes where you drop the
+     file, not what lands in the database.
+
+     Three things in particular are load-bearing and easy to drop:
+
+       · division_data.prev_payload / prev_updated_at / prev_by. Publishing
+         replaces a division wholesale, and these three columns are the only way
+         back. Vendor Assignments' Rollback panel reads them.
+       · change_log and tf_change_log. The "What's New" panel and the change
+         history are rendered from these, so an import that skips them is an
+         import that silently never happened as far as users can tell.
+       · tf_change_log.detail. The panel expands each entry into tables built from
+         detail.added and detail.dateChanges. A summary with no detail renders an
+         entry that opens onto nothing.
+
+     Every writer returns { ok, error } and each is called independently, so one
+     destination failing leaves the others published rather than rolling back a
+     batch that has no transaction spanning it anyway.                          */
+
+  const uid = () =>
+    (crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+
+  // PostgREST caps a request body long before Postgres cares, and Takeoff Flow
+  // already settled on 500 rows a call. Same number here so the two behave alike.
+  const CHUNK = 500;
+
+  async function bulk(op, table, rows, extra) {
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const slice = rows.slice(i, i + CHUNK);
+      const { error } = op === "upsert"
+        ? await client.from(table).upsert(slice, extra)
+        : await client.from(table).insert(slice);
+      if (error) throw error;
+    }
+  }
+
+  /* Which destinations may this person publish to? Read from each app's own role
+     table rather than assumed from Blueprint admin: being able to see the tab is
+     not the same as being allowed to replace a division.
+
+     A person can always read their own row (every app's select policy allows
+     `email = self`), so this works for editors, not just admins. A missing row
+     means viewer, which means no.                                              */
+  async function intakeRoles(email) {
+    const out = { vendorPortal: null, takeoffFlow: null, map: null };
+    const e = BP.normalizeEmail(email);
+
+    async function roleIn(table) {
+      const { data, error } = await client.from(table).select("role,divisions").eq("email", e).maybeSingle();
+      if (error || !data) return null;
+      return { role: data.role, divisions: data.divisions || [] };
+    }
+
+    out.vendorPortal = await roleIn("app_roles");
+    out.takeoffFlow  = await roleIn("tf_app_roles");
+    // The map is gated on the Vendor Assignments role by design — see
+    // map_can_write() in the map's SQL.
+    out.map = out.vendorPortal;
+    return out;
+  }
+
+  // admin publishes any division; editor only the divisions on their row.
+  function canPublish(roleRow, division) {
+    if (!roleRow) return false;
+    if (roleRow.role === "admin") return true;
+    if (roleRow.role === "editor") return (roleRow.divisions || []).indexOf(division) !== -1;
+    return false;
+  }
+
+  /* ---- Vendor Assignments ---- */
+
+  // The published payload for a division, or null. Intake needs this for two
+  // separate reasons and neither is optional: the diff written to change_log, and
+  // the guard that refuses a publish which would gut the division.
+  async function vendorCurrent(key) {
+    const { data, error } = await client.from("division_data")
+      .select("payload,updated_at,updated_by").eq("key", key).maybeSingle();
+    if (error) return { ok: false, error: friendly(error) };
+    return { ok: true, row: data || null, payload: (data && data.payload) || null };
+  }
+
+  async function vendorPublish(key, payload, summary, email) {
+    try {
+      // Re-read immediately before writing rather than trusting what the preview
+      // fetched. A preview can sit on screen for minutes while someone else
+      // publishes, and prev_payload must point at what is actually being
+      // replaced or the rollback restores the wrong version.
+      const { data: prevRow } = await client.from("division_data")
+        .select("payload,updated_at,updated_by").eq("key", key).maybeSingle();
+
+      const clean = Object.assign({}, payload);
+      delete clean._diag;   // diagnostics are for the preview, not the payload
+
+      const { error } = await client.from("division_data").upsert({
+        key,
+        label: clean.division,
+        payload: clean,
+        updated_at: new Date().toISOString(),
+        updated_by: email,
+        prev_payload: prevRow ? prevRow.payload : null,
+        prev_updated_at: prevRow ? prevRow.updated_at : null,
+        prev_by: prevRow ? prevRow.updated_by : null
+      }, { onConflict: "key" });
+      if (error) throw error;
+
+      // Best-effort, exactly as the app treats it: the data is published either
+      // way, and failing the whole publish because the history row did not land
+      // would be the worse outcome.
+      const { error: logErr } = await client.from("change_log")
+        .insert({ key, actor: email, summary });
+      return { ok: true, historyWritten: !logErr, historyError: logErr ? friendly(logErr) : null };
+    } catch (err) {
+      return { ok: false, error: friendly(err) };
+    }
+  }
+
+  /* ---- Takeoff Flow ---- */
+
+  async function flowExisting(division) {
+    const { data, error } = await client.from("flow_rows")
+      .select("id,community_name,community_num,plan,elevation,first_trench_date,plan_name,sort_order")
+      .eq("division", division);
+    if (error) return { ok: false, error: friendly(error), rows: [] };
+    return { ok: true, rows: data || [] };
+  }
+
+  /* Adds new rows and nudges first_trench_date on existing ones. Existing rows are
+     never replaced wholesale — an editor's manual overrides in the grid have to
+     survive an import, which is why the update is a partial upsert of two columns
+     and not the parsed row. */
+  async function flowPublish(division, fresh, updates, entry, email) {
+    try {
+      const ex = await flowExisting(division);
+      if (!ex.ok) return { ok: false, error: ex.error };
+
+      let n = ex.rows.reduce((m, r) => Math.max(m, r.sort_order || 0), 0);
+      const now = new Date().toISOString();
+
+      const newRows = fresh.map(p => {
+        const row = { id: uid(), division, sort_order: ++n, updated_at: now, updated_by: email };
+        for (const k in p) if (k !== "id" && k !== "division" && k !== "sort_order") row[k] = p[k];
+        return row;
+      });
+
+      // One row per id: the planner already collapsed duplicates, but a batch that
+      // touched the same id twice would fail the whole upsert.
+      const byId = new Map();
+      (updates || []).forEach(u => byId.set(u.id, u));
+      const updRows = [...byId.values()].map(u => {
+        const row = { id: u.id, division, updated_at: now, updated_by: email };
+        if (u.trTo) row.first_trench_date = u.trTo;
+        return row;
+      });
+
+      if (newRows.length) await bulk("insert", "flow_rows", newRows);
+      if (updRows.length) await bulk("upsert", "flow_rows", updRows, { onConflict: "id" });
+
+      // What's New. detail carries the per-row tables the panel expands into.
+      const { error: logErr } = await client.from("tf_change_log").insert({
+        id: uid(), division, at: new Date().toISOString(), by: email,
+        summary: entry.summary, detail: entry.detail || null
+      });
+
+      return {
+        ok: true, added: newRows.length, updated: updRows.length,
+        historyWritten: !logErr, historyError: logErr ? friendly(logErr) : null
+      };
+    } catch (err) {
+      return { ok: false, error: friendly(err) };
+    }
+  }
+
+  /* ---- Community Map ---- */
+
+  async function mapCurrent(key) {
+    const { data, error } = await client.from("map_data")
+      .select("payload,people,updated_at,updated_by").eq("key", key).maybeSingle();
+    if (error) return { ok: false, error: friendly(error) };
+    return { ok: true, row: data || null };
+  }
+
+  async function mapPublish(key, label, payload, people, summary, email) {
+    try {
+      const { data: prevRow } = await client.from("map_data")
+        .select("payload,people,updated_at,updated_by").eq("key", key).maybeSingle();
+
+      const { error } = await client.from("map_data").upsert({
+        key, label, payload, people,
+        updated_at: new Date().toISOString(),
+        updated_by: email,
+        prev_payload: prevRow ? prevRow.payload : null,
+        prev_people: prevRow ? prevRow.people : null,
+        prev_updated_at: prevRow ? prevRow.updated_at : null,
+        prev_by: prevRow ? prevRow.updated_by : null
+      }, { onConflict: "key" });
+      if (error) throw error;
+
+      const { error: logErr } = await client.from("map_change_log")
+        .insert({ key, actor: email, summary });
+      return { ok: true, historyWritten: !logErr, historyError: logErr ? friendly(logErr) : null };
+    } catch (err) {
+      return { ok: false, error: friendly(err) };
+    }
+  }
+
   /* --------------------------------------------------------------- errors */
 
   function friendly(error) {
@@ -290,6 +503,10 @@ window.BPDB = (function () {
     loadApps, addApp, updateApp, removeApp,
     loadUsers, setRole, clearRole,
     divisionsFor, provision, pendingInvites,
-    count, countExact, newest, reachable, friendly
+    count, countExact, newest, reachable, friendly,
+    intakeRoles, canPublish,
+    vendorCurrent, vendorPublish,
+    flowExisting, flowPublish,
+    mapCurrent, mapPublish
   };
 })();

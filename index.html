@@ -75,6 +75,16 @@
 <script src="config.js"></script>
 <script src="core.js"></script>
 
+<!-- Data Intake. ingest-core.js is pure logic and is also loaded inside the
+     parsing worker, which is why it is a plain script rather than part of app.js.
+
+     SheetJS is pinned to 0.18.5 — the same version Vendor Assignments and Takeoff
+     Flow load — because intake must parse a workbook exactly as they do. A version
+     drift here would show up as the two disagreeing about a file, which is the
+     class of problem this feature exists to remove. The main thread needs it for
+     nothing itself; the worker imports it separately. -->
+<script src="ingest-core.js"></script>
+
 <!-- The in-memory mock is a development dependency and is not deployed: dev/ is
      excluded from the published site. Load it only when serving from localhost
      without ?live=1, so production never requests a file that isn't there.
