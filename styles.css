@@ -136,9 +136,13 @@ main{max-width:var(--maxw);margin:0 auto;padding:22px 24px 60px}
    sits beside the real ones without looking out of place. */
 .ic-ph{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:grid;place-items:center;
   background:#0057b8;color:#fff;font-weight:800;font-size:14px;position:relative}
-.ic-ph::after{content:"?";position:absolute;top:-4px;right:-4px;width:14px;height:14px;
-  border-radius:50%;background:var(--warn);color:#fff;font-size:9px;display:grid;
-  place-items:center;font-weight:800}
+/* Same problem as the initials: a "?" at 9px / weight 800 in a 14px circle was
+   cramped and barely legible. Larger circle, lighter weight, and dark amber text
+   instead of white — white on amber is roughly 2:1 contrast, which fails at any
+   size, whereas the dark tone clears 7:1 on the dark fill and 4.4:1 on the light. */
+.ic-ph::after{content:"?";position:absolute;top:-3px;right:-3px;width:16px;height:16px;
+  border-radius:50%;background:var(--warn);color:#3d2a08;font-size:11px;display:grid;
+  place-items:center;font-weight:600;line-height:1}
 .apptile-h h3{margin:0;font-size:15.5px;color:var(--navy);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Tiles are fixed-width, so an unbroken 150-character URL would either overflow
@@ -162,8 +166,14 @@ main{max-width:var(--maxw);margin:0 auto;padding:22px 24px 60px}
   border-radius:20px;padding:2px 9px 2px 2px;font-size:11.5px;font-weight:600;
   color:var(--navy);max-width:100%}
 .who .nm{white-space:nowrap}
-.who .av{flex:0 0 auto;width:17px;height:17px;border-radius:50%;background:var(--navy);
-  color:#fff;display:grid;place-items:center;font-size:8.5px;font-weight:800}
+/* Initials at 8.5px / weight 800 were too small and too heavy for two caps: the
+   letters ran together and read as a blob. Same typeface — the family was never
+   the problem — just sized for legibility: a larger circle, a lighter weight and
+   a touch of tracking so the pair separates. line-height:1 keeps them optically
+   centred rather than sitting low on the baseline. */
+.who .av{flex:0 0 auto;width:18px;height:18px;border-radius:50%;background:var(--navy);
+  color:#fff;display:grid;place-items:center;font-size:10px;font-weight:600;
+  letter-spacing:.03em;line-height:1}
 .apptile-f{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;
   color:var(--muted);border-top:1px solid var(--line);padding-top:10px;margin-top:9px}
 .apptile .go{margin-left:auto;color:var(--blue);font-weight:700;font-size:13px}
@@ -195,8 +205,10 @@ tbody tr:hover{background:var(--blue-050)}
   font-weight:600;color:var(--navy);background:var(--card);font-family:inherit}
 .ic-sm{width:24px;height:24px;border-radius:6px;display:block;object-fit:contain;flex:0 0 auto}
 /* same reasoning as .ic-ph — theme-stable brand blue, not var(--navy) */
-.ic-sm.ph{background:#0057b8;color:#fff;font-size:9px;font-weight:800;
-  display:grid;place-items:center}
+/* The 24px variant had the same 9px / weight 800 problem. Calibrated to match the
+   initials avatar; line-height:1 stops the letters riding low in the circle. */
+.ic-sm.ph{background:#0057b8;color:#fff;font-size:10px;font-weight:600;
+  line-height:1;display:grid;place-items:center}
 .ic.ph{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:grid;
   place-items:center;background:#0057b8;color:#fff;font-weight:800;font-size:14px}
 /* Shortening handles readability; this cap is the structural guarantee. Even if a
