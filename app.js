@@ -335,7 +335,7 @@
         '" data-open="' + esc(a.url) + '">' +
         '<div class="apptile-h">' + iconHtml(a) +
           "<div><h3>" + esc(a.name) + "</h3>" +
-          '<div class="sub">' + esc(a.url.replace(/^https:\/\//, "").replace(/\/$/, "")) + "</div></div></div>" +
+          '<div class="sub" title="' + esc(a.url) + '">' + esc(BP.shortenUrl(a.url, 40)) + "</div></div></div>" +
         "<p>" + esc(a.description || "") + "</p>" +
         authorHtml(a) +
         '<div class="apptile-f">' +
@@ -356,7 +356,7 @@
         "<tr>" +
           "<td>" + iconHtml(a, "ic-sm") + "</td>" +
           "<td><b>" + esc(a.name) + "</b></td>" +
-          '<td class="urlc">' + esc(a.url.replace(/^https:\/\//, "").replace(/\/$/, "")) + "</td>" +
+          '<td class="urlc" title="' + esc(a.url) + '">' + esc(BP.shortenUrl(a.url, 44)) + "</td>" +
           "<td>" + esc(BP.formatAuthors(a.authors)) + "</td>" +
           "<td>" + authChipHtml(a) + "</td>" +
           "<td>" + (BP.isManaged(a)

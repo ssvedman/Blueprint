@@ -123,6 +123,10 @@ main{max-width:var(--maxw);margin:0 auto;padding:22px 24px 60px}
 .apptile:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .apptile.inactive{opacity:.55}
 .apptile-h{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+/* A flex child will not shrink below its content width by default, so without
+   min-width:0 the text-overflow below never triggers and a long URL pushes the
+   tile wider instead of clipping. */
+.apptile-h>div{min-width:0}
 .ic{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:block;object-fit:contain}
 /* Generated placeholder for an app that publishes no logo.svg.
    The background is the literal brand blue, NOT var(--navy): --navy inverts in
@@ -135,8 +139,13 @@ main{max-width:var(--maxw);margin:0 auto;padding:22px 24px 60px}
 .ic-ph::after{content:"?";position:absolute;top:-4px;right:-4px;width:14px;height:14px;
   border-radius:50%;background:var(--warn);color:#fff;font-size:9px;display:grid;
   place-items:center;font-weight:800}
-.apptile-h h3{margin:0;font-size:15.5px;color:var(--navy)}
-.apptile-h .sub{font-size:12px;color:var(--muted);margin-top:1px;word-break:break-all}
+.apptile-h h3{margin:0;font-size:15.5px;color:var(--navy);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Tiles are fixed-width, so an unbroken 150-character URL would either overflow
+   or wrap to five lines. Shortened text plus a hard clip keeps the header to one
+   line; the full URL is on the title attribute. */
+.apptile-h .sub{font-size:12px;color:var(--muted);margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .apptile p{margin:0 0 12px;font-size:13px;color:var(--muted);min-height:36px}
 /* Names are never truncated. Sharing a row with the label left too little width
    for two full names, and clipping them to "Denis Cre…" made the tile less
@@ -190,7 +199,12 @@ tbody tr:hover{background:var(--blue-050)}
   display:grid;place-items:center}
 .ic.ph{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:grid;
   place-items:center;background:#0057b8;color:#fff;font-weight:800;font-size:14px}
-.urlc{color:var(--muted);font-size:12.5px}
+/* Shortening handles readability; this cap is the structural guarantee. Even if a
+   value arrives unshortened, the cell clips instead of widening the table and
+   pushing the row actions off-screen behind a scrollbar. */
+.urlc{color:var(--muted);font-size:12.5px;max-width:300px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:1100px){ .urlc{max-width:180px} }
 
 /* ---------- Toolbar / forms ---------- */
 .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}

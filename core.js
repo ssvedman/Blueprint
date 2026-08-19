@@ -137,6 +137,25 @@
     };
   }
 
+  /* --------------------------------------------------------- url shortening */
+
+  /* A SharePoint link is routinely 150+ characters. Printed in full it pushed the
+     manage table past its container and hid the Edit and Remove buttons behind a
+     horizontal scrollbar, and wrapped a tile header onto five lines.
+
+     Deliberately dumb: drop the protocol, drop a trailing slash, cut at the cap
+     and append an ellipsis. An earlier version parsed the URL and kept the host
+     plus a middle-elided tail, which read as more clever than useful — the front
+     of a URL is the part that identifies it, so a plain prefix is what a reader
+     wants. The full URL stays in the title attribute and in the stored record. */
+  function shortenUrl(url, max) {
+    const cap = max || 44;
+    const bare = ((url || "") + "").trim()
+      .replace(/^https?:\/\//i, "")
+      .replace(/\/+$/, "");
+    return bare.length <= cap ? bare : bare.slice(0, cap) + "…";
+  }
+
   /* ------------------------------------------------------------ icon discovery */
 
   /* Icon detection used to probe one path — <url>/logo.svg — which is only *our*
@@ -277,12 +296,23 @@
     if (!/^https:\/\//i.test(u)) {
       return { ok: false, error: "URL must start with https:// ." };
     }
+    let parsed;
     try {
-      new URL(u);
+      parsed = new URL(u);
     } catch (_) {
       return { ok: false, error: "That URL could not be parsed." };
     }
-    return { ok: true, url: u.endsWith("/") ? u : u + "/" };
+
+    /* Only a bare directory-style URL gets a trailing slash. Appending one
+       unconditionally corrupted anything with a query string or fragment:
+         …/IQBSw5_b?e=hzjaOq   became   …/IQBSw5_b?e=hzjaOq/
+       which silently changes the parameter value, so the stored link no longer
+       opens the document. A path ending in a filename is left alone too. */
+    const lastSeg = parsed.pathname.split("/").pop();
+    const looksLikeFile = lastSeg.indexOf(".") !== -1;
+    const addSlash = !parsed.search && !parsed.hash && !looksLikeFile && !u.endsWith("/");
+
+    return { ok: true, url: addSlash ? u + "/" : u };
   }
 
   function validateNewApp(form, existingApps) {
@@ -598,6 +628,7 @@
     collator, byName, sortApps, sortEmails,
     isManaged, managedApps, activeApps, AUTH_KINDS, authKind, authMeta,
     EDITABLE_APP_FIELDS, pickEditable, rejectedFields, slugify, removalImpact,
+    shortenUrl,
     ICON_PATHS, isScalableIcon, iconCandidates, bestIcon,
     MAX_DATA_ICON_BYTES, isDataIconUrl, validateIconUrl,
     normalizeEmail, validateEmail, validateUrl, validateNewApp,
