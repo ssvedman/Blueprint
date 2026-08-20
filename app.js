@@ -1290,7 +1290,22 @@
           notes: find.notes, problems: find.problems
         });
 
+        /* Kept so a coordinate entered below can be re-diffed against the same
+           baseline. Recomputing the diff after a placement is the difference
+           between the card saying "3 awaiting a location" and it still saying 3
+           after you have just placed one. */
+        t.currentPayload = cur.row.payload;
+
         t.diff = MAPCORE.diffDocument(cur.row.payload, t.mapResult.next);
+
+        /* Which communities are still off the map, and what there is to go on for
+           each: the streets the permit log gave us, anything a previous run
+           tried, and any proposal waiting to be confirmed. Rendered on the card
+           so the operator can place them before publishing rather than
+           discovering afterwards that the starts went nowhere. */
+        t.streets = (startsRec.parsed.mapStarts || {}).streets || {};
+        t.pending = MAPCORE.pendingLocations(t.mapResult.next, t.streets);
+
         t.guard = {
           blocking: t.mapResult.problems,
           warnings: [],
@@ -1300,14 +1315,11 @@
           t.guard.warnings.push("No contacts export, so construction managers are "
             + "left exactly as they are. Everything else still updates.");
         }
-        if (t.mapResult.needGeo.length) {
-          t.guard.warnings.push(
-            `${t.mapResult.needGeo.length} new communit${t.mapResult.needGeo.length === 1 ? "y has" : "ies have"} `
-            + "no address yet, so they are held off the map until located: "
-            + t.mapResult.needGeo.slice(0, 6).join(", ")
-            + (t.mapResult.needGeo.length > 6 ? ` and ${t.mapResult.needGeo.length - 6} more` : "")
-            + ". Set an address, then run tools/validate.js --fix.");
-        }
+        /* Deliberately NOT pushed onto guard.warnings. Placing a community from
+           this card changes the count, and a warning computed once at plan time
+           would go on announcing three long after you had placed one — which is
+           how a card teaches you to stop reading it. The list itself carries the
+           count, and is rebuilt on every render. */
       }
     }
 
@@ -1411,6 +1423,29 @@
     if (clear) clear.onclick = () => { intakeReset(); renderIntakeBody(); };
     const all = document.getElementById("intakePublishAll");
     if (all) all.onclick = () => intakePublishAll();
+
+    /* Locating edits the document this card is about to publish — in memory,
+       nothing written — so the counts, the diff and the pending list all have to
+       be recomputed against it afterwards. Re-rendering the whole body is the
+       cheap and honest way: it guarantees what you see is the document as it now
+       stands, rather than a card that still says three when you have just placed
+       one of them. */
+    const mapT = (intake.targets || []).find(t => t.target === "communityMap" && t.mapResult);
+    if (mapT) {
+      bindLocate(body, "ilo",
+        num => (mapT.mapResult.next.communities || []).find(c => c.num === num),
+        async (num, what) => {
+          mapT.locatedHere = (mapT.locatedHere || 0) + 1;
+          mapT.diff = MAPCORE.diffDocument(mapT.currentPayload, mapT.mapResult.next);
+          mapT.pending = MAPCORE.pendingLocations(mapT.mapResult.next, mapT.streets || {});
+          toast(what.kind === "rejected"
+            ? what.name + " left unplaced — that point will not be offered again"
+            : what.name + " placed at " + what.lat + ", " + what.lon +
+              " — publish to save it", what.kind === "rejected" ? "" : "ok");
+          renderIntakeBody();
+        },
+        state.email);
+    }
   }
 
   function intakeFilesHtml() {
@@ -1616,6 +1651,15 @@
         detail += '<p class="hint">Gained contacts: ' + cov.nowStaffed.map(esc).join(", ") +
           " — remove from AWAITING_CONTACTS in map-core.js.</p>";
       }
+
+      /* Placing one here edits the document about to be published, so it goes out
+         with the same Publish button and the same rollback copy. Nothing is
+         written until that is pressed. */
+      detail += locateListHtml(t.pending || [], "ilo", mayPublish,
+        "Placed here, they go out with this publish. Most communities resolve on " +
+        "their own from the permit log's street names — run " +
+        "<code>tools/locate-communities.js</code> in the map repo for that. What is " +
+        "left needs a person.", true);
     }
 
     const notes = (t.sheetNote ? [t.sheetNote] : []).concat(
@@ -1652,6 +1696,12 @@
   function intakeNothingToDo(t) {
     if (t.target === "takeoffFlow") return !t.plan.fresh.length && !t.plan.updates.length;
     if (t.target === "communityMap") {
+      /* A coordinate placed on this card is a change the diff cannot see — it
+         counts communities and starts, and a placement moves neither. Without
+         this, re-dropping last week's log and then placing a community would
+         hide the Publish button and quietly discard the one thing you came here
+         to do. */
+      if (t.locatedHere) return false;
       const d = t.diff;
       return !!d && !d.commsAdded && !d.commsRemoved && d.startsBefore === d.startsAfter;
     }
@@ -1812,6 +1862,221 @@
     renderIntakeBody();
   }
 
+  /* ------------------------------------------------------- LOCATING A COMMUNITY
+
+     A community arrives from the permit log with no coordinate, and until it has
+     one it is absent from the map, from its counts and from its exports — and so
+     are its starts. Placing it is therefore not housekeeping; it is the
+     difference between a hundred scheduled starts being visible and not.
+
+     Everything that DECIDES anything lives in map-core.js and is unit-tested
+     without a browser. This is the surface: it renders what map-core already
+     worked out and hands back what the operator said.
+
+     ── WHY THERE IS NO "LOCATE THEM ALL" BUTTON HERE ─────────────────────────
+     Resolving a street name needs Nominatim, which requires a User-Agent
+     identifying the caller. A browser cannot set that header — it is forbidden —
+     so a browser cannot use the service on the terms it asks for, whatever CORS
+     permits. Street resolution therefore runs from the map repo's
+     tools/locate-communities.js, which can meet both obligations, and most
+     communities are placed there without anyone doing anything.
+
+     What lands HERE is the remainder: the ones that need a person. A proposal to
+     confirm or refuse, a coordinate to type, an address to look up. Census
+     answers address lookups and asks for no header, so that one does work from a
+     browser — assuming it permits cross-origin requests, which is unverified. If
+     it does not, the message says so and the coordinate box still works.
+
+     ── TWO HOSTS, ONE RENDERER ───────────────────────────────────────────────
+     Data Intake edits a document that has not been published yet; Health edits
+     the published one directly. Same rows, same controls, same rules — only the
+     write differs, which is the `onChange` handler. A second implementation is
+     how the two would come to disagree about what "placed" means.               */
+
+  /* One pending community. `ns` namespaces the data attributes so two hosts on
+     one page cannot bind each other's buttons. */
+  function locateRowHtml(p, ns, canEdit, haveStreets) {
+    const id = ns + "-" + p.num;
+    const hidden = p.startsHidden
+      ? '<span class="pill warn">' + p.startsHidden.toLocaleString() +
+        " start" + (p.startsHidden === 1 ? "" : "s") + " hidden</span>"
+      : '<span class="pill">no starts scheduled</span>';
+
+    let evidence = "";
+    if (p.streets && p.streets.length) {
+      /* The streets are the evidence the CLI works from, and showing them is what
+         makes "still pending" legible: a community with four streets is waiting
+         on the geocoder, one with none is waiting on the permit log. */
+      const shown = p.streets.slice(0, 6).map(s =>
+        esc(s.street) + ' <span class="hint" style="display:inline">(' + s.lots + ")</span>").join(", ");
+      evidence = '<p class="hint">Streets in the permit log: ' + shown +
+        (p.streets.length > 6 ? " and " + (p.streets.length - 6) + " more" : "") + ".</p>";
+    } else if (haveStreets) {
+      /* Only sayable when a permit log was actually read. Saying it on the Health
+         route — where no workbook has been dropped and NO community has streets —
+         would be reporting a fact about the data that is really a fact about the
+         screen you are on. */
+      evidence = '<p class="hint">No street names in the permit log for this one — its ' +
+        "whole address column is blank or reads TBD, so nothing can be looked up. " +
+        "It needs a coordinate typed in.</p>";
+    } else {
+      evidence = "";
+    }
+
+    if (p.previously && p.previously.length) {
+      evidence += '<p class="hint">Last tried: ' + p.previously.slice(0, 4).map(t =>
+        esc(t.street) + " → " + esc(t.result)).join("; ") + ".</p>";
+    } else if (p.why) {
+      evidence += '<p class="hint">' + esc(p.why) + "</p>";
+    }
+
+    /* A proposal is a question, so it is rendered as one — with the reason it is
+       not being applied on its own, because "confirm this" without the reason is
+       a button people press to make the row go away. */
+    let proposal = "";
+    if (p.proposed) {
+      proposal =
+        '<div class="locate-proposal">' +
+          "<p><b>Proposed:</b> " + esc(String(p.proposed.lat)) + ", " + esc(String(p.proposed.lon)) +
+          (p.proposed.street ? ' from "' + esc(p.proposed.street) + '"' : "") + " " +
+          '<a href="https://www.openstreetmap.org/?mlat=' + encodeURIComponent(p.proposed.lat) +
+          "&mlon=" + encodeURIComponent(p.proposed.lon) + '#map=15/' +
+          encodeURIComponent(p.proposed.lat) + "/" + encodeURIComponent(p.proposed.lon) +
+          '" target="_blank" rel="noopener">check it on a map</a></p>' +
+          '<p class="hint">' + esc(p.proposed.why || "") + "</p>" +
+          (canEdit
+            ? '<button class="linkbtn" data-' + ns + '-accept="' + esc(p.num) + '">Confirm this</button>' +
+              '<button class="linkbtn danger" data-' + ns + '-reject="' + esc(p.num) + '">Reject</button>'
+            : "") +
+        "</div>";
+    }
+
+    if (p.rejected && p.rejected.length) {
+      proposal += '<p class="hint">' + p.rejected.length + " earlier proposal" +
+        (p.rejected.length === 1 ? " was" : "s were") + " rejected and will not be " +
+        "offered again on the same evidence.</p>";
+    }
+
+    const entry = canEdit
+      ? '<div class="locate-entry">' +
+          '<input type="text" id="' + id + '-ll" placeholder="28.6607, -81.5458" ' +
+                 'aria-label="Coordinate for ' + esc(p.name) + '">' +
+          '<button class="btn mini" data-' + ns + '-place="' + esc(p.num) + '">Place</button>' +
+          '<input type="text" id="' + id + '-addr" placeholder="or an address to look up" ' +
+                 'aria-label="Address for ' + esc(p.name) + '">' +
+          '<button class="btn mini ghost" data-' + ns + '-lookup="' + esc(p.num) + '">Look up</button>' +
+        "</div>" +
+        '<p class="hint" id="' + id + '-msg"></p>'
+      : "";
+
+    return '<div class="locate-row" data-' + ns + '-row="' + esc(p.num) + '">' +
+      "<h5>" + esc(p.name) + " " + hidden + "</h5>" +
+      evidence + proposal + entry +
+      "</div>";
+  }
+
+  /* `haveStreets` says whether a permit log was read at all, which changes what
+     an empty street list MEANS — see locateRowHtml. */
+  function locateListHtml(pending, ns, canEdit, lead, haveStreets) {
+    if (!pending || !pending.length) return "";
+    const hidden = pending.reduce((a, p) => a + p.startsHidden, 0);
+    return '<div class="locate">' +
+      "<h4>Awaiting a location — " + pending.length +
+        (hidden ? ", holding back " + hidden.toLocaleString() +
+                  " start" + (hidden === 1 ? "" : "s") : "") + "</h4>" +
+      (lead ? '<p class="hint">' + lead + "</p>" : "") +
+      pending.map(p => locateRowHtml(p, ns, canEdit, haveStreets)).join("") +
+      "</div>";
+  }
+
+  /* Wire one rendered list up. `find(num)` returns the community record to write
+     onto; `onChange(num, what)` is called after a successful write so the host
+     can re-render, re-diff or publish. Both hosts share every rule below. */
+  function bindLocate(root, ns, find, onChange, actor) {
+    if (!root) return;
+    const msgOf = num => root.querySelector("#" + ns + "-" + num + "-msg");
+    const say = (num, text, bad) => {
+      const el = msgOf(num);
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = bad ? "var(--bad)" : "var(--muted)";
+    };
+
+    root.querySelectorAll("[data-" + ns + "-place]").forEach(b => {
+      b.onclick = async () => {
+        const num = b.getAttribute("data-" + ns + "-place");
+        const box = root.querySelector("#" + ns + "-" + num + "-ll");
+        const pt = MAPCORE.parseLatLon(box && box.value);
+        if (!pt) {
+          say(num, 'Could not read that as a coordinate. Try "28.6607, -81.5458".', true);
+          return;
+        }
+        const c = find(num);
+        if (!c) { say(num, "That community is no longer in this import.", true); return; }
+        const r = MAPCORE.placeManually(c, pt.lat, pt.lon, { by: actor });
+        if (!r.ok) { say(num, r.error, true); return; }
+        await onChange(num, { kind: "placed", lat: r.lat, lon: r.lon, name: c.name });
+      };
+    });
+
+    /* The address path is an ASSIST, not an action: it fills the coordinate box
+       and leaves the Place button to the person. A geocoder's answer for a
+       street that does not exist yet is a confident guess somewhere else, and
+       the whole design of this feature is built on never applying one of those
+       without a human looking at it. */
+    root.querySelectorAll("[data-" + ns + "-lookup]").forEach(b => {
+      b.onclick = async () => {
+        const num = b.getAttribute("data-" + ns + "-lookup");
+        const box = root.querySelector("#" + ns + "-" + num + "-addr");
+        const addr = (box && box.value || "").trim();
+        if (!addr) { say(num, "Type an address first — a house number and street.", true); return; }
+        b.disabled = true;
+        say(num, "Looking it up…");
+        try {
+          const hit = await GEOCLIENT.address(addr);
+          if (!hit) { say(num, "The geocoder found no such address.", true); return; }
+          if (hit.error) { say(num, hit.error, true); return; }
+          const ll = root.querySelector("#" + ns + "-" + num + "-ll");
+          if (ll) ll.value = hit.lat.toFixed(6) + ", " + hit.lon.toFixed(6);
+          say(num, 'That resolves to "' + (hit.matchedStreet || addr) + '" at ' +
+                   hit.lat.toFixed(5) + ", " + hit.lon.toFixed(5) + " (" + hit.source + ", " +
+                   hit.precision + " precision). Check it, then press Place.");
+        } finally {
+          b.disabled = false;
+        }
+      };
+    });
+
+    root.querySelectorAll("[data-" + ns + "-accept]").forEach(b => {
+      b.onclick = async () => {
+        const num = b.getAttribute("data-" + ns + "-accept");
+        const c = find(num);
+        if (!c) { say(num, "That community is no longer in this import.", true); return; }
+        const r = MAPCORE.acceptProposal(c, { by: actor });
+        if (!r.ok) { say(num, r.error, true); return; }
+        await onChange(num, { kind: "confirmed", lat: r.lat, lon: r.lon, name: c.name });
+      };
+    });
+
+    root.querySelectorAll("[data-" + ns + "-reject]").forEach(b => {
+      b.onclick = async () => {
+        const num = b.getAttribute("data-" + ns + "-reject");
+        const c = find(num);
+        if (!c) { say(num, "That community is no longer in this import.", true); return; }
+        const okGo = await confirmBox("Reject this location?",
+          "<p>" + esc(c.name) + " would not be placed, and this point will not be " +
+          "offered again.</p>" +
+          '<p class="hint">Two streets agreeing, or a sibling phase being placed, is ' +
+          "different evidence and would still go through. Only this answer is refused.</p>",
+          "Reject", true);
+        if (!okGo) return;
+        const r = MAPCORE.rejectProposal(c, { by: actor });
+        if (!r.ok) { say(num, r.error, true); return; }
+        await onChange(num, { kind: "rejected", name: c.name });
+      };
+    });
+  }
+
   /* ----------------------------------------------------------------- HEALTH */
 
   async function renderHealth(v, stale) {
@@ -1820,6 +2085,14 @@
     const H = CFG.HEALTH;
     const panels = [];
     const alerts = [];
+
+    /* The map's write permission is the Vendor Assignments role — see
+       map_can_write() in the map's SQL — so this asks the same question Data
+       Intake asks, and then narrows it to admins. Cached on `intake` because it
+       is the same lookup and the same answer. */
+    if (!intake.roles) intake.roles = await DB.intakeRoles(state.email);
+    if (stale()) return;
+    const mapAdmin = !!(intake.roles && intake.roles.map && intake.roles.map.role === "admin");
 
     for (const app of BP.sortApps(state.apps)) {
       if (stale()) return;        // health runs many queries; bail out early
@@ -1871,6 +2144,26 @@
                   m.unlocated ? m.unlocatedStarts.toLocaleString() + " starts hidden" : null),
               row("Rolling window from", m.dataStart || "—")
             );
+
+            /* The one place in Health that WRITES, so it is gated twice.
+
+               Health is visible to every signed-in user — that was a deliberate
+               change, so people can see the state of the estate without being
+               given admin. This route writes straight to the live map document
+               with no preview and no second pair of eyes, which is a different
+               proposition from publishing an import that has been reviewed on
+               screen. So it is offered only to map administrators, not to the
+               editors who can publish through Data Intake.
+
+               The database refuses the write too — map_can_write() — so a
+               tampered-with page gets an error rather than a result. This gate
+               is about not offering people a button that would fail. */
+            if (m.unlocated && mapAdmin) {
+              checks.push(
+                '<div class="hrow"><span class="hl">Place them</span>' +
+                '<span class="hv"><button class="linkbtn" id="hLocate">' +
+                "Enter coordinates…</button></span></div>");
+            }
             st = worse(worse(st, sAge), sGeo);
 
             if (m.unlocated) {
@@ -1926,6 +2219,87 @@
 
     const rerun = $("hRerun");
     if (rerun) rerun.onclick = () => render();
+
+    const loc = $("hLocate");
+    if (loc) loc.onclick = () => locateFromHealth(() => render());
+  }
+
+  /* Place a community from Health, against the document that is live right now.
+
+     Unlike Data Intake there is nothing staged here: each placement is written
+     immediately, because there is no Publish button on this screen and a change
+     sitting in a modal that someone closes is a change that silently did not
+     happen. Every write goes through mapPublish, so it keeps the rollback copy
+     and the history entry exactly as an import does.
+
+     No street names are available on this route — they come out of the permit
+     log, and no workbook has been dropped — so this offers the two things that
+     work without one: confirm or refuse a proposal a CLI run already recorded,
+     and type a coordinate. */
+  async function locateFromHealth(afterAll) {
+    const cur = await DB.mapCurrent("orlando");
+    if (!cur.ok) { toast("Could not read the map document: " + cur.error, "bad"); return; }
+    if (!cur.row || !cur.row.payload) { toast("No map document is published yet.", "bad"); return; }
+
+    const doc = cur.row.payload;
+    let touched = 0;
+
+    const bodyHtml = () => {
+      const pending = MAPCORE.pendingLocations(doc, {});
+      if (!pending.length) {
+        return '<p>Every community on the map has a coordinate.</p>';
+      }
+      return locateListHtml(pending, "hlo", true,
+        "Each one is saved the moment you place it — there is no publish step here. " +
+        "Street names come from the permit log, so they are not available on this " +
+        "screen; run <code>tools/locate-communities.js</code> in the map repo to " +
+        "resolve them automatically.", false);
+    };
+
+    modal("Communities awaiting a location", bodyHtml(), (ov) => {
+      const wire = () => bindLocate(ov, "hlo",
+        num => (doc.communities || []).find(c => c.num === num),
+        async (num, what) => {
+          const body = ov.querySelector(".modal-body");
+          if (what.kind === "rejected") {
+            // A rejection changes no coordinate, but it must still be persisted
+            // or the next import asks the same question again.
+            const res = await DB.mapPublish("orlando", "Orlando", doc, cur.row.people,
+              { rejected: [what.name], via: "health" }, state.email);
+            if (!res.ok) { toast("Could not save: " + res.error, "bad"); return; }
+            toast(what.name + " left unplaced — that point will not be offered again");
+          } else {
+            const res = await DB.mapPublish("orlando", "Orlando", doc, cur.row.people,
+              { located: [what.name], via: "health" }, state.email);
+            if (!res.ok) { toast("Could not save: " + res.error, "bad"); return; }
+            toast(what.name + " placed at " + what.lat + ", " + what.lon + " — saved", "ok");
+          }
+          touched++;
+          if (body) { body.innerHTML = bodyHtml(); wire(); }
+        },
+        state.email);
+      wire();
+
+      /* Re-running the checks costs a screen of queries, so it happens once when
+         the panel is dismissed rather than after every placement.
+
+         Attached as extra listeners rather than by replacing the modal's own
+         close, because there are three ways out — the ×, the backdrop and Escape
+         — and hooking only the one you thought of is how the counts on the page
+         behind end up disagreeing with what you just did. `done` is idempotent
+         for the same reason. */
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        document.removeEventListener("keydown", onEsc);
+        if (touched && afterAll) afterAll();
+      };
+      function onEsc(e) { if (e.key === "Escape") done(); }
+      ov.querySelector("[data-x]").addEventListener("click", done);
+      ov.addEventListener("click", e => { if (e.target === ov) done(); });
+      document.addEventListener("keydown", onEsc);
+    });
   }
 
   function row(label, value, st, tag) {

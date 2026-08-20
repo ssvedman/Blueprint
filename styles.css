@@ -301,6 +301,26 @@ tbody tr:hover{background:var(--blue-050)}
 .intake-notes li.warn{color:var(--warn)}
 .intake-notes li.bad{color:var(--bad);font-weight:600}
 
+/* ---------- Locating a community ----------
+   Shared by Data Intake's map card and the Health panel's modal. One block,
+   because they render the same rows through the same function and a second
+   stylesheet is how the two would drift apart visually. */
+.locate{margin-top:12px;border-top:1px solid var(--line);padding-top:12px}
+.locate h4{margin:0 0 4px;font-size:13px;color:var(--warn)}
+.locate-row{border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+  margin-top:10px;background:var(--bg)}
+.locate-row h5{margin:0 0 6px;font-size:13px;color:var(--navy);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.locate-row p{margin:4px 0}
+.locate-proposal{border-left:3px solid var(--warn);padding:6px 0 6px 10px;margin:8px 0}
+.locate-proposal p{margin:0 0 4px;font-size:13px}
+.locate-entry{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.locate-entry input[type=text]{width:auto;flex:1 1 190px;min-width:0;margin:0}
+.locate-entry .btn.mini{flex:0 0 auto}
+@media(max-width:640px){
+  .locate-entry input[type=text]{flex:1 1 100%}
+}
+
 /* ---------- Health ---------- */
 .healthgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px}
 .healthgrid .panel{margin-bottom:0}

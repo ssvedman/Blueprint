@@ -161,7 +161,15 @@ self.onmessage = function (e) {
            two destinations and skipped here.
 
            Aggregation is deliberately NOT done here: it needs dataStart, and the
-           page owns that decision. */
+           page owns that decision.
+
+           The same pass also yields the STREETS, community by community, which is
+           how a community that arrives with no coordinate gets placed. Every
+           permit row carries an Address — a real one for an established
+           community, "TBD Sunfish Drive" for a brand-new one — and the street is
+           there either way. Collected here because it is the same walk over the
+           same rows; thrown away here, and the page has no way to get it back
+           without re-reading a 7 MB file. */
         if (division === "orlando") {
           progress(id, "parsing", 80);
           const X = self.XLSX;
@@ -170,6 +178,7 @@ self.onmessage = function (e) {
           const mapFind = { notes: [], problems: [] };
           const parsed = self.MAPCORE.parseStarts(rows, sheet, mapFind);
           out.mapStarts = { records: parsed.records, idName: parsed.idName,
+                            streets: parsed.streets,
                             sheet, notes: mapFind.notes, problems: mapFind.problems };
         }
 

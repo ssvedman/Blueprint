@@ -87,6 +87,11 @@
 <!-- Shared verbatim with the Community Map repo, which builds the same document
      from its CLI. A drift test fails if the two copies stop matching. -->
 <script src="map-core.js"></script>
+<!-- Also shared verbatim. Only its address lookup is reachable from a browser:
+     street lookups need a User-Agent, which a browser cannot set, so it refuses
+     them here and the map's CLI does that work. Used when somebody types an
+     address for a community that has no coordinate yet. -->
+<script src="geo-client.js"></script>
 
 <!-- The in-memory mock is a development dependency and is not deployed: dev/ is
      excluded from the published site. Load it only when serving from localhost
