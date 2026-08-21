@@ -192,16 +192,22 @@ begin
     new.division_scoped_roles := old.division_scoped_roles;
     new.division_source       := old.division_source;
     new.slug                  := old.slug;
+    new.data_table            := old.data_table;
   end if;
 
   -- On INSERT from a client, refuse to accept wiring at all. Apps added
   -- through the UI are launcher-only until someone edits them here in SQL.
   if (tg_op = 'INSERT') then
-    if new.role_table is not null and not public.hub_is_service() then
+    -- data_table is tested alongside role_table, not after it: an insert that
+    -- sets only data_table carries no role_table to trip the old condition, and
+    -- would otherwise have named its own count table on the way in.
+    if (new.role_table is not null or new.data_table is not null)
+       and not public.hub_is_service() then
       new.role_table := null; new.list_rpc := null;
       new.token_rpc := null;  new.token_pool := null;
       new.roles := '{}';      new.division_scoped_roles := '{}';
       new.division_source := '{"kind":"none"}'::jsonb;
+      new.data_table := null;
     end if;
   end if;
 

@@ -285,15 +285,39 @@
     const initials = esc(shortOf(app));
 
     if (app.icon_url) {
-      // A configured icon that fails to load is also a missing asset, so it falls
-      // back to the identical flagged placeholder rather than an unstyled gap.
+      /* A configured icon that fails to load is also a missing asset, so it falls
+         back to the identical flagged placeholder rather than an unstyled gap.
+
+         The placeholder rides along as data attributes and is built by the
+         delegated listener below — there is deliberately no inline onerror any
+         more. The old one interpolated the initials into a JS string literal
+         nested inside an HTML attribute, and the browser HTML-decodes an
+         attribute before the JS parser ever sees it: esc()'s &#39; turned back
+         into a bare ' and closed the string. An app named "Alpha 'Beta" has
+         initials A'B, so the escaping was defeated by the very character it
+         existed to neutralise. Data attributes are read through .dataset, which
+         is never parsed as code, so there is no second context to escape for. */
       return '<img class="' + c + '" src="' + esc(app.icon_url) + '" alt="" ' +
-             'onerror="this.outerHTML=\'<div class=&quot;' + phClass +
-             '&quot; title=&quot;Logo failed to load&quot;>' + initials + '</div>\'">';
+             'data-ph-class="' + esc(phClass) + '" data-ph-text="' + initials + '">';
     }
     return '<div class="' + phClass + '" title="No logo.svg published yet">' +
            initials + "</div>";
   }
+
+  /* Swap a failed icon for its placeholder. Registered once, in the capture
+     phase, because an image's error event does not bubble — capture is the only
+     phase that reaches the document at all. One listener therefore covers every
+     icon Blueprint will ever draw, including ones written into innerHTML long
+     after this ran, which is what lets iconHtml stay a pure string function. */
+  document.addEventListener("error", e => {
+    const img = e.target;
+    if (!img || img.tagName !== "IMG" || !img.dataset || img.dataset.phText == null) return;
+    const ph = document.createElement("div");
+    ph.className = img.dataset.phClass || "ic-ph";
+    ph.title = "Logo failed to load";
+    ph.textContent = img.dataset.phText;   // text, not markup — nothing to escape
+    if (img.parentNode) img.parentNode.replaceChild(ph, img);
+  }, true);
 
   function shortOf(app) {
     return (app.name || "?").split(/\s+/).map(w => w[0]).join("").slice(0, 3).toUpperCase();
@@ -894,12 +918,12 @@
     modal(isNew ? "Add a user" : "Manage access", body, (ov, close) => {
       // enable/disable division checkboxes to match the chosen role
       managed.forEach(app => {
-        const sel = ov.querySelector('[data-r="' + app.slug + '"]');
+        const sel = ov.querySelector('[data-r="' + CSS.escape(app.slug) + '"]');
         const sync = () => {
           const scopedRole = (app.division_scoped_roles || []).indexOf(sel.value) !== -1;
-          const wrap = ov.querySelector('[data-divs="' + app.slug + '"]');
+          const wrap = ov.querySelector('[data-divs="' + CSS.escape(app.slug) + '"]');
           if (wrap) wrap.querySelectorAll("input").forEach(i => { i.disabled = !scopedRole; });
-          ov.querySelector('[data-card="' + app.slug + '"]')
+          ov.querySelector('[data-card="' + CSS.escape(app.slug) + '"]')
             .classList.toggle("on", sel.value !== IMPLICIT);
         };
         sel.onchange = sync;
@@ -914,9 +938,9 @@
   function readAccess(ov, managed) {
     const grants = [], clears = [];
     for (const app of managed) {
-      const role = ov.querySelector('[data-r="' + app.slug + '"]').value;
+      const role = ov.querySelector('[data-r="' + CSS.escape(app.slug) + '"]').value;
       if (role === IMPLICIT) { clears.push(app); continue; }
-      const wrap = ov.querySelector('[data-divs="' + app.slug + '"]');
+      const wrap = ov.querySelector('[data-divs="' + CSS.escape(app.slug) + '"]');
       const divisions = wrap && (app.division_scoped_roles || []).indexOf(role) !== -1
         ? [...wrap.querySelectorAll("input:checked")].map(i => i.value) : [];
       grants.push({ enabled: true, slug: app.slug, role, divisions });
@@ -943,34 +967,51 @@
     const btn = ov.querySelector("[data-yes]");
     btn.disabled = true; btn.textContent = "Saving…";
 
-    const results = [];
-    for (const g of plan.grants) {
-      const app = state.apps.find(a => a.slug === g.slug);
-      const r = await DB.setRole(app, v.email, g.role, g.divisions);
-      results.push({ app: app.name, text: g.role +
-        (g.divisions.length ? " (" + g.divisions.map(d => divLabel(app, d)).join(", ") + ")" : ""),
-        ok: r.ok, error: r.error });
-    }
-    for (const app of clears) {
-      const had = state.users.find(u => u.email === v.email);
-      if (!had || !had.roles[app.slug] || !had.roles[app.slug].explicit) continue;
-      const r = await DB.clearRole(app, v.email);
-      results.push({ app: app.name, text: "implicit viewer", ok: r.ok, error: r.error });
-    }
+    /* Everything that awaits lives inside this try. The button was disabled and
+       relabelled above, and until this was wrapped the ONLY thing that restored
+       it was a clean run to the end — so a single rejection anywhere below left
+       it stuck on "Saving…" for good, with no error shown and no way to retry
+       short of reloading. The finally is the guarantee; the catch is what turns
+       a stranded modal into a readable message. */
+    try {
+      let links = [];
+      const results = [];
+      for (const g of plan.grants) {
+        const app = state.apps.find(a => a.slug === g.slug);
+        const r = await DB.setRole(app, v.email, g.role, g.divisions);
+        results.push({ app: app.name, text: g.role +
+          (g.divisions.length ? " (" + g.divisions.map(d => divLabel(app, d)).join(", ") + ")" : ""),
+          ok: r.ok, error: r.error });
+      }
+      for (const app of clears) {
+        const had = state.users.find(u => u.email === v.email);
+        if (!had || !had.roles[app.slug] || !had.roles[app.slug].explicit) continue;
+        const r = await DB.clearRole(app, v.email);
+        results.push({ app: app.name, text: "implicit viewer", ok: r.ok, error: r.error });
+      }
 
-    let links = [];
-    if (ov.querySelector("#acLink").checked) {
-      // Everyone needs a password even with no explicit role, so fall back to
-      // the shared pool when nothing scoped was granted.
-      const pools = BP.poolsForGrants(plan.grants);
-      const r = await DB.provision(v.email, plan.grants.length ? plan.grants
-        : [{ slug: null, tokenPool: "A" }], state.adminSlugs, state.apps);
-      links = r.links || [];
-      void pools;
+      if (ov.querySelector("#acLink").checked) {
+        // Everyone needs a password even with no explicit role, so fall back to
+        // the shared pool when nothing scoped was granted. That sentinel grant
+        // carries a pool and no slug, and provision() reads the pool off it.
+        const r = await DB.provision(v.email, plan.grants.length ? plan.grants
+          : [{ slug: null, tokenPool: "A" }], state.adminSlugs, state.apps);
+        links = r.links || [];
+      }
+
+      await renderAccessResult(ov, v, results, links, msg, out);
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = (e && e.message) || "Something went wrong saving access.";
+    } finally {
+      btn.disabled = false; btn.textContent = isNew ? "Create access" : "Save changes";
     }
+  }
 
-    btn.disabled = false; btn.textContent = isNew ? "Create access" : "Save changes";
-
+  // The reporting half of saveAccess, split out only so the caller's try block
+  // stays readable. Nothing here awaits a write; the one await refreshes the
+  // table sitting behind the modal.
+  async function renderAccessResult(ov, v, results, links, msg, out) {
     const failed = results.filter(r => !r.ok);
     msg.className = "msg " + (failed.length ? "err" : "ok");
     msg.innerHTML = (results.length
@@ -1077,7 +1118,15 @@
   };
 
   function intakeReset() {
-    if (intake.worker) { intake.worker.terminate(); intake.worker = null; }
+    if (intake.worker) {
+      // Settle anything still in flight before terminating. A terminated worker
+      // sends no reply either, so without this a reset mid-parse strands the
+      // same promises a failed boot would.
+      const w = intake.worker;
+      intake.worker = null;
+      if (w._die) w._die("The import was reset before this file finished parsing.");
+      w.terminate();
+    }
     intake.files = [];
     intake.results = {};
     intake.batch = null;
@@ -1103,6 +1152,35 @@
       ingestCore: base + "ingest-core.js",
       mapCore: base + "map-core.js"
     };
+
+    /* Every intakeAsk that has not settled yet, so a failure of the WORKER —
+       as opposed to a failure reported by it — can settle all of them.
+
+       Without this the worst case is silent. A worker whose importScripts 404s,
+       or whose script throws while evaluating, never sends a message at all:
+       there is no "error" reply to reject on, so every promise stays pending,
+       every file sits on "parsing…" for good, and the only way out is a reload
+       the operator has no reason to think they need. An error event is the one
+       notification the platform does give us, so it has to be wired to the
+       promises rather than to nothing. */
+    w._pending = new Set();
+    const die = why => {
+      const waiting = [...w._pending];
+      w._pending.clear();
+      // The instance is poisoned — a worker that failed to boot will not boot
+      // on the next postMessage either. Drop it so the next attempt builds a
+      // fresh one instead of posting into something that can never answer.
+      if (intake.worker === w) intake.worker = null;
+      for (const fail of waiting) fail(new Error(why));
+    };
+    w._die = die;
+    w.onerror = e => die(e && e.message
+      ? "The file parser failed to start: " + e.message
+      : "The file parser failed to start — it may not have downloaded. "
+        + "Reload Blueprint and try again.");
+    w.onmessageerror = () =>
+      die("The file parser sent a reply that could not be read.");
+
     intake.worker = w;
     return w;
   }
@@ -1111,15 +1189,20 @@
   function intakeAsk(message, onProgress) {
     const w = intakeWorker();
     return new Promise((resolve, reject) => {
+      // Held by the worker so a boot failure or a reset can settle this promise
+      // from the outside; see intakeWorker's `die`.
+      const fail = err => { w.removeEventListener("message", handler); reject(err); };
       const handler = e => {
         const d = e.data || {};
         if (d.id !== message.id) return;
         if (d.type === "progress") { if (onProgress) onProgress(d); return; }
         w.removeEventListener("message", handler);
+        w._pending.delete(fail);
         if (d.type === "error") reject(new Error(d.message));
         else resolve(d);
       };
       w.addEventListener("message", handler);
+      w._pending.add(fail);
       w.postMessage(Object.assign({ urls: w._urls }, message));
     });
   }
@@ -1334,6 +1417,16 @@
         t.streets = (startsRec.parsed.mapStarts || {}).streets || {};
         t.pending = MAPCORE.pendingLocations(t.mapResult.next, t.streets);
 
+        /* Community-DB knows where these are supposed to be. Fetched only when
+           something is actually waiting — it is a whole extra query, and on a
+           normal week nothing is. Never fatal: a failure here costs context on a
+           screen, not the import. */
+        if (t.pending.length) {
+          const loc = await DB.mapLocalities("orlando");
+          t.localityError = loc.ok ? null : loc.error;
+          attachLocalities(t.pending, loc.by);
+        }
+
         t.guard = {
           blocking: t.mapResult.problems,
           warnings: [],
@@ -1472,7 +1565,7 @@
               " — publish to save it", what.kind === "rejected" ? "" : "ok");
           renderIntakeBody();
         },
-        state.email);
+        state.email, mapT.pending);
     }
   }
 
@@ -1921,6 +2014,28 @@
      write differs, which is the `onChange` handler. A second implementation is
      how the two would come to disagree about what "placed" means.               */
 
+  /* Hang each community's CIS locality on its pending row. Kept separate from
+     pendingLocations() because map-core is network-free and this comes from a
+     different table in a different app — the two are joined here, at the point
+     where both are in hand. */
+  function attachLocalities(pending, by) {
+    for (const p of pending || []) p.locality = (by || {})[p.num] || null;
+    return pending;
+  }
+
+  // "DeBary, FL 32713" out of a parsed locality, for showing and for appending
+  // to a street somebody types into the address box.
+  function localityLine(loc) {
+    if (!loc) return "";
+    const place = loc.city || (loc.county ? loc.county + " County" : null);
+    /* "DeBary, FL 32713" — state and postcode separated by a SPACE, which is how
+       an address is written and how a geocoder expects to read one. Joining all
+       three with commas gives "DeBary, FL, 32713", which looks close enough to
+       be missed in review and parses worse. */
+    const tail = [loc.state, loc.zip].filter(Boolean).join(" ");
+    return [place, tail].filter(Boolean).join(", ");
+  }
+
   /* One pending community. `ns` namespaces the data attributes so two hosts on
      one page cannot bind each other's buttons. */
   function locateRowHtml(p, ns, canEdit, haveStreets) {
@@ -1949,6 +2064,15 @@
         "It needs a coordinate typed in.</p>";
     } else {
       evidence = "";
+    }
+
+    /* Shown because it changes what the operator should do. A community with a
+       CIS locality can be geocoded from its street names by the map's CLI; one
+       without has nothing to narrow the search with, and typing the coordinate
+       is the shorter road. */
+    if (p.locality) {
+      evidence += '<p class="hint">' + esc(p.locality.source || "Community-DB") +
+        " puts it in <b>" + esc(localityLine(p.locality)) + "</b>.</p>";
     }
 
     if (p.previously && p.previously.length) {
@@ -2020,9 +2144,17 @@
   /* Wire one rendered list up. `find(num)` returns the community record to write
      onto; `onChange(num, what)` is called after a successful write so the host
      can re-render, re-diff or publish. Both hosts share every rule below. */
-  function bindLocate(root, ns, find, onChange, actor) {
+  function bindLocate(root, ns, find, onChange, actor, pending) {
     if (!root) return;
-    const msgOf = num => root.querySelector("#" + ns + "-" + num + "-msg");
+    /* A community number reaches this selector as data — it comes off a sheet,
+       not out of the code — and an id selector is the least forgiving place to
+       put untrusted text: querySelector THROWS SyntaxError on a malformed one
+       rather than returning null, so a stray space or a leading digit would take
+       the whole binding pass down. CSS.escape makes the id match literally.
+       `ns` is a namespace the two hosts pass in as a constant, so it needs no
+       escaping, but it is part of the same identifier and escapes harmlessly. */
+    const idOf = (num, part) => "#" + CSS.escape(ns + "-" + num + "-" + part);
+    const msgOf = num => root.querySelector(idOf(num, "msg"));
     const say = (num, text, bad) => {
       const el = msgOf(num);
       if (!el) return;
@@ -2033,7 +2165,7 @@
     root.querySelectorAll("[data-" + ns + "-place]").forEach(b => {
       b.onclick = async () => {
         const num = b.getAttribute("data-" + ns + "-place");
-        const box = root.querySelector("#" + ns + "-" + num + "-ll");
+        const box = root.querySelector(idOf(num, "ll"));
         const pt = MAPCORE.parseLatLon(box && box.value);
         if (!pt) {
           say(num, 'Could not read that as a coordinate. Try "28.6607, -81.5458".', true);
@@ -2055,18 +2187,27 @@
     root.querySelectorAll("[data-" + ns + "-lookup]").forEach(b => {
       b.onclick = async () => {
         const num = b.getAttribute("data-" + ns + "-lookup");
-        const box = root.querySelector("#" + ns + "-" + num + "-addr");
+        const box = root.querySelector(idOf(num, "addr"));
         const addr = (box && box.value || "").trim();
         if (!addr) { say(num, "Type an address first — a house number and street.", true); return; }
+
+        /* Append the CIS locality when the person only typed a street. Census
+           needs a town to disambiguate, and asking them to retype what
+           Community-DB already knows is how a lookup gets skipped. Left alone if
+           they typed a comma — that means they gave their own. */
+        const p = (pending || []).filter(x => x.num === num)[0];
+        const loc = p && p.locality;
+        const full = (loc && addr.indexOf(",") === -1)
+          ? addr + ", " + localityLine(loc) : addr;
         b.disabled = true;
         say(num, "Looking it up…");
         try {
-          const hit = await GEOCLIENT.address(addr);
+          const hit = await GEOCLIENT.address(full);
           if (!hit) { say(num, "The geocoder found no such address.", true); return; }
           if (hit.error) { say(num, hit.error, true); return; }
-          const ll = root.querySelector("#" + ns + "-" + num + "-ll");
+          const ll = root.querySelector(idOf(num, "ll"));
           if (ll) ll.value = hit.lat.toFixed(6) + ", " + hit.lon.toFixed(6);
-          say(num, 'That resolves to "' + (hit.matchedStreet || addr) + '" at ' +
+          say(num, 'That resolves to "' + (hit.matchedStreet || full) + '" at ' +
                    hit.lat.toFixed(5) + ", " + hit.lon.toFixed(5) + " (" + hit.source + ", " +
                    hit.precision + " precision). Check it, then press Place.");
         } finally {
@@ -2272,8 +2413,15 @@
     const doc = cur.row.payload;
     let touched = 0;
 
+    /* Read once, before the panel opens. It does not change while the panel is
+       up, and re-reading it on every re-render would put a query behind every
+       keystroke's worth of progress. */
+    const loc = await DB.mapLocalities("orlando");
+    let shown = [];
+
     const bodyHtml = () => {
-      const pending = MAPCORE.pendingLocations(doc, {});
+      const pending = attachLocalities(MAPCORE.pendingLocations(doc, {}), loc.by);
+      shown = pending;
       if (!pending.length) {
         return '<p>Every community on the map has a coordinate.</p>';
       }
@@ -2281,7 +2429,9 @@
         "Each one is saved the moment you place it — there is no publish step here. " +
         "Street names come from the permit log, so they are not available on this " +
         "screen; run <code>tools/locate-communities.js</code> in the map repo to " +
-        "resolve them automatically.", false);
+        "resolve them automatically." +
+        (loc.ok ? "" : " Community-DB could not be read (" + esc(loc.error) +
+                       "), so the towns below are missing."), false);
     };
 
     modal("Communities awaiting a location", bodyHtml(), (ov) => {
@@ -2305,7 +2455,7 @@
           touched++;
           if (body) { body.innerHTML = bodyHtml(); wire(); }
         },
-        state.email);
+        state.email, shown);
       wire();
 
       /* Re-running the checks costs a screen of queries, so it happens once when

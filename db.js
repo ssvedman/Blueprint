@@ -209,6 +209,12 @@ window.BPDB = (function () {
 
     const written = [];
     for (const g of grants) {
+      /* A grant with no slug is the sentinel for "mint a credential link, assign
+         no role" — the admin ticked the link box and left every role unset.
+         There is nothing to write, and skipping straight past setRole is the
+         whole handling: the pools loop below still mints the link, because
+         poolsForGrants reads tokenPool and never looks at slug. */
+      if (!g.slug) continue;
       const app = apps.find(a => a.slug === g.slug);
       const r = await setRole(app, v.email, g.role, g.divisions);
       written.push({ app: app.name, role: g.role, divisions: g.divisions, ok: r.ok, error: r.error });
@@ -489,6 +495,32 @@ window.BPDB = (function () {
     };
   }
 
+  /* Where Community-DB thinks each community is.
+
+     Community Information Sheets are filled in long before a community's first
+     permit, and they carry "City, State, Zip" and the permitting municipality
+     against a JDE number — which normalises to exactly the community number the
+     map uses, so this is an exact join rather than a name match. That locality is
+     the one thing on hand that can place a brand-new community: the permit log
+     gives street names and nothing else, and a street name without a town is a
+     question about a whole state.
+
+     Read through the signed-in session, so RLS applies: a viewer sees published
+     sheets, an editor sees drafts too. That is the right way round — map-core
+     prefers a published sheet and labels a draft as one.
+
+     Never fatal. A failure here means fewer communities can be placed, which is
+     the state the map was in before this existed; it must not stop an import. */
+  async function mapLocalities(division) {
+    const { data, error } = await client.from("cdb_cis")
+      .select("jde,status,data")
+      .eq("division", division || "orlando")
+      .not("jde", "is", null);
+    if (error) return { ok: false, error: friendly(error), by: {}, sheets: 0 };
+    const rows = data || [];
+    return { ok: true, by: MAPCORE.localitiesFrom(rows), sheets: rows.length };
+  }
+
   async function mapCurrent(key) {
     const { data, error } = await client.from("map_data")
       .select("payload,people,updated_at,updated_by").eq("key", key).maybeSingle();
@@ -542,6 +574,6 @@ window.BPDB = (function () {
     intakeRoles, canPublish,
     vendorCurrent, vendorPublish,
     flowExisting, flowPublish,
-    mapCurrent, mapPublish, mapHealth
+    mapCurrent, mapPublish, mapHealth, mapLocalities
   };
 })();

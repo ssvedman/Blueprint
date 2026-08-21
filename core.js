@@ -339,6 +339,16 @@
     if (!name) errors.push("Name is required.");
     const u = validateUrl(form && form.url);
     if (!u.ok) errors.push(u.error);
+    /* The icon is checked here rather than only on the edit path. Both paths
+       used to reach the same column by different routes — edit called
+       validateIconUrl, add passed the raw field straight through — so a
+       javascript: icon that the editor refused could still be typed into the
+       Add form. Validating at the shared layer is what makes the two converge.
+       Blank is legitimate (it means "use the placeholder"), and validateIconUrl
+       already answers ok:true/url:null for it, so there is no empty check to
+       write: taking icon.url below also trims, as the edit path does. */
+    const icon = validateIconUrl(form && form.icon_url);
+    if (!icon.ok) errors.push(icon.error);
 
     const slug = slugify(name);
     if (name && !slug) errors.push("Name must contain at least one letter or number.");
@@ -360,7 +370,7 @@
             name,
             url: u.url,
             description: ((form.description || "") + "").trim() || null,
-            icon_url: form.icon_url || null,
+            icon_url: icon.url,
             authors: parseAuthors(form.authors),
             active: true,
             // Wiring stays null: a new app is launcher-only until someone

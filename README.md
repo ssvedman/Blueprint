@@ -43,9 +43,10 @@ absent from the map, from its counts and from its exports — and so are its sch
 starts. The map card lists these, worst first, with what is known about each and how many
 starts each is holding back.
 
-Most are placed automatically by the map's own tooling. What reaches this screen is the
-remainder: a proposal to confirm or refuse, or a community that needs a coordinate typed
-in. Placing one here goes out with the same Publish button. The same list is reachable
+Most are placed automatically by the map's own tooling, which geocodes the street names
+the permit log carries and cross-references Community-DB for the town each community is
+supposed to be in. What reaches this screen is the remainder: a proposal to confirm or
+refuse, or a community that needs a coordinate typed in. Placing one here goes out with the same Publish button. The same list is reachable
 from **Health** for the weeks when nothing is being imported; that route writes to the
 live document immediately, so it is offered to map administrators only.
 
