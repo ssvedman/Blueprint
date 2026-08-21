@@ -194,9 +194,18 @@ begin
   new.updated_by := public.hub_email();
   new.updated_at := now();
 
-  -- On UPDATE, silently preserve the wiring columns. The client is not trusted
-  -- to omit them; if it sends them, they are ignored.
-  if (tg_op = 'UPDATE') then
+  /* On UPDATE, silently preserve the wiring columns — against a CLIENT. The
+     client is not trusted to omit them; if it sends them, they are ignored.
+
+     The service-role exemption is not symmetry for its own sake. Without it this
+     branch applied to the SQL editor as well, which meant wiring could only ever
+     be set at INSERT time: add a wiring column later and no existing row could
+     be given a value, because the backfill UPDATE was reverted here and still
+     reported "UPDATE 2". delete_rpc was exactly that — added, backfilled, and
+     null afterwards on a database that had just been set up, with Remove access
+     reporting that no app provides a delete function. The INSERT branch below
+     has always trusted the service role; this now matches it. */
+  if (tg_op = 'UPDATE') and not public.hub_is_service() then
     new.role_table            := old.role_table;
     new.list_rpc              := old.list_rpc;
     new.token_rpc             := old.token_rpc;
@@ -249,10 +258,13 @@ do $$ begin
     check (delete_rpc is null or role_table is not null);
 exception when duplicate_object then null; end $$;
 
+-- Keyed on role_table, not slug: the role table is the wiring identity and is
+-- what the delete function is paired with, whereas a slug is a display-level
+-- key that an install may have chosen differently.
 update public.hub_apps set delete_rpc = 'admin_delete_user'
-  where slug = 'Vendor-Portal' and delete_rpc is null;
+  where role_table = 'app_roles' and delete_rpc is null;
 update public.hub_apps set delete_rpc = 'tf_admin_delete_user'
-  where slug = 'Takeoff-Flow' and delete_rpc is null;
+  where role_table = 'tf_app_roles' and delete_rpc is null;
 
 /* RLS ---------------------------------------------------------------------- */
 
