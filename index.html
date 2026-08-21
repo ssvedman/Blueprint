@@ -71,18 +71,43 @@
 
 <div id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- supabase-js is pinned to an exact release rather than floating on @2. The
+     bare @2 specifier resolved to whichever v2 was newest at page load, so two
+     visitors an hour apart could run different code than anything anyone tested,
+     and a bad — or tampered-with — publish would land in production with no step
+     in between. The integrity hash makes that guarantee real: the browser refuses
+     the file outright unless its bytes are the ones verified here, so the CDN is
+     no longer trusted to serve what it promised.
+
+     The path is dist/umd/supabase.js, not …min.js: the package ships only the
+     former, already minified, and jsDelivr fabricates the .min.js name on demand
+     by prepending its own banner. Hashing that would put a CDN-generated artifact
+     behind the integrity check instead of a published file. Upgrading within 2.x
+     means changing the version and the hash together — one without the other
+     blocks the script and takes the whole app down with it. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.3/dist/umd/supabase.js"
+        integrity="sha384-qafw21c/iciq0VXsi9FzkfoQv5I/V0iqE4lSNcKXPnW9/UTJLnv5CcN4FHxVLnKg"
+        crossorigin="anonymous"></script>
 <script src="config.js"></script>
 <script src="core.js"></script>
 
 <!-- Data Intake. ingest-core.js is pure logic and is also loaded inside the
      parsing worker, which is why it is a plain script rather than part of app.js.
 
-     SheetJS is pinned to 0.18.5 — the same version Vendor Assignments and Takeoff
-     Flow load — because intake must parse a workbook exactly as they do. A version
-     drift here would show up as the two disagreeing about a file, which is the
-     class of problem this feature exists to remove. The main thread needs it for
-     nothing itself; the worker imports it separately. -->
+     SheetJS is vendored at 0.20.3 under vendor/, not loaded from a CDN. The 0.18.5
+     build this used to pull carries CVE-2023-30533 (prototype pollution from a
+     crafted workbook, fixed in 0.19.3) and CVE-2024-22363 (ReDoS, fixed in 0.20.2),
+     and intake's whole job is opening files that arrive from elsewhere. 0.20.3 is
+     published only from cdn.sheetjs.com, which is also why it is copied in rather
+     than linked: the worker imports it through importScripts, where no integrity
+     attribute is possible, so a remote copy would be unverifiable on every parse.
+
+     Vendor Assignments and Takeoff Flow still load 0.18.5, so parse parity with
+     them is no longer guaranteed by the two sides running identical code. The
+     ingest tests are what hold that contract now: they parse the real workbooks and
+     assert intake's output matches what those apps produce. If the apps and intake
+     ever disagree about a file, that is where it will show up. The main thread needs
+     SheetJS for nothing itself; the worker imports it separately. -->
 <script src="ingest-core.js"></script>
 <!-- Shared verbatim with the Community Map repo, which builds the same document
      from its CLI. A drift test fails if the two copies stop matching. -->

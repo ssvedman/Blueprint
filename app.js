@@ -1064,14 +1064,20 @@
 
   /* The worker is built from a blob so the static site needs no separate build
      step, and it is handed absolute URLs because a blob worker has no useful base
-     URL of its own — relative importScripts would resolve against the blob. */
+     URL of its own — relative importScripts would resolve against the blob.
+
+     SheetJS is served from vendor/ rather than a CDN. importScripts inside a blob
+     worker cannot carry an integrity attribute, so a CDN copy was a third party we
+     were trusting on every parse with no way to verify the bytes. Same-origin, the
+     file is part of the deploy and is reviewed like the rest of it. It goes through
+     the same `base` as the other two imports for the same reason they do. */
   function intakeWorker() {
     if (intake.worker) return intake.worker;
     const base = location.href.replace(/[^/]*$/, "");
     const src = 'importScripts("' + base + 'ingest-worker.js");';
     const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
     w._urls = {
-      xlsx: "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+      xlsx: base + "vendor/xlsx-0.20.3/xlsx.full.min.js",
       ingestCore: base + "ingest-core.js",
       mapCore: base + "map-core.js"
     };
