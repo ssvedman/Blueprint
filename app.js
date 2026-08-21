@@ -191,21 +191,42 @@
 
   /* -------------------------------------------------------------------- tabs */
 
-  /* Data Intake is not admin-gated here, because "admin" in Blueprint means
-     admin of a role table, and the people who publish division data are often
-     editors rather than admins. The real gate is per-destination and lives in
-     renderIntake(): each app's own role table decides, read through
-     DB.intakeRoles(), and RLS refuses anything the client lets through. */
+  /* Data Intake is held to a named list rather than to a role. It was open to
+     everyone on the theory that each destination gates itself — and it does,
+     in renderIntake() via DB.intakeRoles(), with RLS behind that. But a single
+     drop rewrites whole divisions across three apps at once, and any editor in
+     any one app could reach the screen and start a publish. The list is in
+     CFG.INTAKE_EMAILS; Blueprint admin deliberately does not confer it, since
+     admin here means admin of one app's role table.
+
+     This hides the tab and refuses the navigation. It is not the security
+     boundary: what a person may write is still their row in each app's role
+     table and the RLS policies on the destination tables. */
+  const INTAKE_EMAILS = (CFG.INTAKE_EMAILS || [])
+    .map(BP.normalizeEmail).filter(Boolean);
+
+  function mayIntake() {
+    const me = BP.normalizeEmail(state.email || "");
+    if (!me) return false;
+    // The mock has no real identities and cannot reach production, so the dev
+    // account stands in for the owner there — otherwise the tab would be
+    // unreachable in local dev and in the UI tests without editing config.
+    if (!DB.LIVE && me === BP.normalizeEmail(CFG.DEV_USER || "")) return true;
+    return INTAKE_EMAILS.indexOf(me) !== -1;
+  }
+
   const TABS = [
-    { id: "apps", label: "Apps", admin: false },
-    { id: "intake", label: "Data Intake", admin: false },
-    { id: "users", label: "Users", admin: true },
-    { id: "health", label: "Health", admin: false }
+    { id: "apps", label: "Apps" },
+    { id: "intake", label: "Data Intake", gate: mayIntake,
+      deny: "Data Intake is limited to the people who maintain the imports." },
+    { id: "users", label: "Users", gate: () => state.isAdmin,
+      deny: "That section is for admins only." },
+    { id: "health", label: "Health" }
   ];
 
   function renderTabs() {
     $("tabs").innerHTML = TABS
-      .filter(t => !t.admin || state.isAdmin)
+      .filter(t => !t.gate || t.gate())
       .map(t => '<button class="tab' + (state.tab === t.id ? " active" : "") +
                 '" data-tab="' + t.id + '">' + t.label + "</button>").join("");
     $("tabs").querySelectorAll("[data-tab]").forEach(b => {
@@ -215,18 +236,19 @@
 
   // Gate here as well as in renderTabs(). Hiding a tab button is presentation,
   // not access control — this refuses the navigation itself, so a stale state
-  // or a console call cannot land a non-admin on the people-management screen.
-  // The real boundary is still server-side: the list RPCs and RLS refuse a
-  // non-admin regardless of what the client renders.
+  // or a console call cannot land someone on the people-management screen or
+  // on Data Intake. The real boundary is still server-side: the list RPCs and
+  // the destination tables' RLS refuse regardless of what the client renders.
   function allowed(tab) {
     const t = TABS.find(x => x.id === tab);
     if (!t) return false;
-    return !t.admin || state.isAdmin;
+    return !t.gate || t.gate();
   }
 
   function go(tab) {
     if (!allowed(tab)) {
-      if (tab !== "apps") toast("That section is for admins only.", "err");
+      const t = TABS.find(x => x.id === tab);
+      if (tab !== "apps") toast((t && t.deny) || "You do not have access to that section.", "err");
       tab = "apps";
     }
     state.tab = tab;

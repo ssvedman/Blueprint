@@ -10,7 +10,7 @@ what.
 
 - **Apps** — a launcher tile for each tool, with its description and author.
 - **Data Intake** — one place to drop the weekly workbooks, which then update every
-  tool that needs them.
+  tool that needs them, for named maintainers only.
 - **Users** — administrators manage each person's access per app, including division
   scope, and issue sign-in links for new users.
 - **Health** — a read-only status view across the tools, open to everyone.
@@ -40,22 +40,17 @@ which is long enough to freeze a tab.
 
 A community new to the permit log arrives with no coordinate, and until it has one it is
 absent from the map, from its counts and from its exports — and so are its scheduled
-starts. The map card lists these, worst first, with the streets the permit log gave for
-each and how many starts each is holding back.
+starts. The map card lists these, worst first, with what is known about each and how many
+starts each is holding back.
 
-Most are placed automatically by the map's own tooling, which resolves those street names
-and applies a coordinate only when two of them agree. What reaches this screen is the
-remainder: a proposal to confirm or refuse, or a community with nothing to go on that
-needs a coordinate typed in. Placing one here goes out with the same Publish button;
-nothing is written before that.
+Most are placed automatically by the map's own tooling. What reaches this screen is the
+remainder: a proposal to confirm or refuse, or a community that needs a coordinate typed
+in. Placing one here goes out with the same Publish button. The same list is reachable
+from **Health** for the weeks when nothing is being imported; that route writes to the
+live document immediately, so it is offered to map administrators only.
 
-The same list is reachable from **Health**, for the weeks when you are not importing
-anything. That route writes to the live document immediately, with no preview, so it is
-offered to map administrators only.
-
-Rejecting a proposal is remembered — the same street landing in the same place is a
-question already answered — but it suppresses that evidence rather than the community, so
-a second street resolving later still places it.
+Rejecting a proposal is remembered, but it suppresses that evidence rather than the
+community — better evidence later still places it.
 
 ## Access
 

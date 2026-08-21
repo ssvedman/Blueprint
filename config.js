@@ -39,6 +39,18 @@ window.APP_CONFIG = {
   // Everyone at ALLOWED_DOMAIN without an explicit role row gets this.
   DEFAULT_ROLE: "viewer",
 
+  /* ---- Data Intake ------------------------------------------------------
+     Who sees the Data Intake tab. Intake is not an ordinary feature: one drop
+     replaces whole divisions across three apps at once, so it is held to an
+     explicit list of people rather than to a role. Blueprint admin is not
+     enough — a Community-DB admin has no business republishing Takeoff Flow.
+
+     Lower-case; addresses are compared normalised. Empty means nobody, which
+     is the safe failure. Note this hides the tab and refuses the navigation;
+     what a person may actually WRITE is still each app's own role table and
+     its RLS policies — see intakeRoles() in db.js.                          */
+  INTAKE_EMAILS: ["stephen.svedman@lennar.com"],
+
   /* ---- credential links ------------------------------------------------- */
   // Every invite and password-reset link lands here, including links minted from
   // inside the other three apps. In local mode this is overridden to the current
