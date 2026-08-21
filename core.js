@@ -544,6 +544,132 @@
         };
   }
 
+  /* ------------------------------------------------------------- offboarding */
+
+  /* Deleting the login is the only thing that actually removes access. Setting
+     every app to "implicit viewer" reads like removal and is not: everyone at
+     ALLOWED_DOMAIN can still sign in and read by default, so a person clearing
+     out every role row would keep exactly the access they started with.
+
+     The delete functions live one per role table, same as the mint functions,
+     and Community-DB ships none at all — so the RPC cannot be hardcoded and the
+     registry has to say which apps offer one. */
+  function chooseDeleteRpc(apps, operatorAdminSlugs) {
+    const candidates = managedApps(apps).filter(a => a.delete_rpc);
+    if (!candidates.length) {
+      return {
+        ok: false,
+        error: "No app in the registry provides a delete-user function, so logins " +
+               "cannot be removed from Blueprint."
+      };
+    }
+    const authorized = candidates.filter(
+      a => (operatorAdminSlugs || []).indexOf(a.slug) !== -1
+    );
+    const chosen = authorized[0] || null;
+    return chosen
+      ? { ok: true, rpc: chosen.delete_rpc, viaApp: chosen.name, viaSlug: chosen.slug }
+      : {
+          ok: false,
+          error:
+            "You are not an admin in " +
+            candidates.map(a => a.name).join(" or ") +
+            ", so you cannot delete a login."
+        };
+  }
+
+  /* Which apps would be left with no admin at all if this person went. Not a
+     block — sometimes the last admin is exactly who you are offboarding — but
+     it is the one consequence that is invisible until someone needs it, so the
+     confirm dialog says it out loud. */
+  function orphanedAdminApps(email, users, apps) {
+    const target = normalizeEmail(email);
+    return managedApps(apps).filter(app => {
+      const row = (users || []).find(u => normalizeEmail(u.email) === target);
+      const cur = row && row.roles && row.roles[app.slug];
+      if (!cur || !cur.explicit || cur.role !== "admin") return false;
+      return !(users || []).some(u => {
+        const r = u.roles && u.roles[app.slug];
+        return normalizeEmail(u.email) !== target && r && r.explicit && r.role === "admin";
+      });
+    }).map(app => app.name);
+  }
+
+  /* Everything the UI needs to decide whether an account CAN be removed, and
+     what removing it would do. Refusing here rather than mid-write is the whole
+     point: once the login is gone there is no undo, and a run that clears two
+     role tables and then fails on the third is worse than one that never began.
+
+     Three refusals, each for a different reason:
+
+       · your own account — you would lock yourself out mid-operation, and the
+         sibling apps refuse the same thing in the same words.
+       · a role list that failed to load — an app whose roles could not be read
+         may hold a row for this person that we would not know to clear. Removing
+         on partial information is how orphan rows are made.
+       · an app where you are not an admin — the delete would be filtered away by
+         RLS and come back looking like success, because a policy that hides rows
+         does not raise an error. The row would survive the login, and re-creating
+         the address later would silently hand back that access.               */
+  function buildRemovalPlan(email, users, apps, opts) {
+    const options = opts || {};
+    const target = normalizeEmail(email);
+    const adminOf = options.operatorAdminSlugs || [];
+    const managed = managedApps(apps);
+
+    if (!target) return { ok: false, error: "No account selected." };
+    if (target === normalizeEmail(options.operatorEmail)) {
+      return { ok: false, error: "You can't remove your own account. Ask another admin to do it." };
+    }
+
+    const unreadable = managed
+      .filter(a => (options.failedApps || []).indexOf(a.name) !== -1)
+      .map(a => a.name);
+    if (unreadable.length) {
+      return {
+        ok: false,
+        error: "The role list for " + unreadable.join(" and ") + " could not be read, " +
+               "so Blueprint cannot tell what this person has there. Fix that first — " +
+               "removing now would leave a role row behind."
+      };
+    }
+
+    const row = (users || []).find(u => normalizeEmail(u.email) === target) || null;
+    const clears = managed
+      .filter(a => row && row.roles && row.roles[a.slug] && row.roles[a.slug].explicit)
+      .map(a => ({
+        slug: a.slug,
+        name: a.name,
+        roleTable: a.role_table,
+        role: row.roles[a.slug].role,
+        divisions: row.roles[a.slug].divisions || []
+      }));
+
+    const blocked = clears.filter(c => adminOf.indexOf(c.slug) === -1).map(c => c.name);
+    if (blocked.length) {
+      return {
+        ok: false,
+        error: "They hold a role in " + blocked.join(" and ") + ", where you are not an " +
+               "admin. Ask an admin there to clear it first, or this removal would " +
+               "leave that role behind."
+      };
+    }
+
+    const del = chooseDeleteRpc(apps, adminOf);
+    if (!del.ok) return { ok: false, error: del.error };
+
+    return {
+      ok: true,
+      email: target,
+      known: !!row,
+      clears,
+      orphanedAdmins: orphanedAdminApps(target, users, apps),
+      rpc: del.rpc,
+      viaApp: del.viaApp,
+      viaSlug: del.viaSlug
+    };
+  }
+
   const BLUEPRINT_SLUG = "blueprint";
 
   // URLs carry a human-meaningful tag, not the internal pool letter — "cdb"
@@ -663,6 +789,7 @@
     parseAuthors, formatAuthors, initialsOf,
     mergeUsers, isAdminAnywhere, adminSlugs, explicitRoleCount, filterUsers,
     buildGrantPlan, poolsForGrants, chooseMintRpc,
+    chooseDeleteRpc, orphanedAdminApps, buildRemovalPlan,
     BLUEPRINT_SLUG, POOL_TAG, TAG_POOL, buildRecoverUrl, parseRecoverHash,
     POOL_B_TTL_DAYS, tokenExpiry, pendingInvites,
     assess, daysSince, rollUp, relativeDay, escapeHtml

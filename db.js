@@ -189,6 +189,48 @@ window.BPDB = (function () {
     return { ok: true };
   }
 
+  /* Offboarding. Takes a plan from BP.buildRemovalPlan(), which has already
+     refused the cases that must never reach a write — your own account, an
+     unreadable role list, an app you do not administer.
+
+     Order matters and is not interchangeable. Role rows go first, the login
+     last: a role row keyed by email outlives the account, so a run that deleted
+     the login and then failed to clear a role would leave that grant waiting for
+     anyone who ever gets that address re-created. Clearing first means the worst
+     case is a person who still has a login and no roles, which is visible in the
+     table and fixable by pressing the button again.
+
+     For the same reason the first failure aborts rather than pressing on.     */
+  async function removeUser(plan, apps) {
+    if (!plan || !plan.ok) return { ok: false, error: (plan && plan.error) || "No removal plan." };
+
+    const cleared = [];
+    for (const c of plan.clears) {
+      const app = (apps || []).find(a => a.slug === c.slug) || { role_table: c.roleTable };
+      const r = await clearRole(app, plan.email);
+      if (!r.ok) {
+        return {
+          ok: false, cleared,
+          error: "Couldn't clear the " + c.name + " role (" + r.error +
+                 "), so the login was left in place. Nothing else was changed."
+        };
+      }
+      cleared.push(c.name);
+    }
+
+    const { data, error } = await client.rpc(plan.rpc, { target_email: plan.email });
+    // Past this point the role rows are gone but the login is not, so the error
+    // says so — otherwise the operator reads "failed" and assumes nothing moved.
+    const stranded = cleared.length
+      ? " Their roles in " + cleared.join(" and ") + " were already cleared; " +
+        "the login still exists."
+      : "";
+    if (error) return { ok: false, cleared, error: friendly(error) + stranded };
+    if (data && data.ok === false) return { ok: false, cleared, error: data.error + stranded };
+
+    return { ok: true, email: plan.email, cleared, viaApp: plan.viaApp };
+  }
+
   /* ---------------------------------------------------------- provisioning */
 
   async function divisionsFor(app) {
@@ -568,7 +610,7 @@ window.BPDB = (function () {
     LIVE, FORCED_LIVE_LOCALLY, onLocalhost, client, BLUEPRINT_URL,
     signIn, currentEmail, signOut, redeem,
     loadApps, addApp, updateApp, removeApp,
-    loadUsers, setRole, clearRole,
+    loadUsers, setRole, clearRole, removeUser,
     divisionsFor, provision, pendingInvites,
     count, countExact, newest, reachable, friendly,
     intakeRoles, canPublish,

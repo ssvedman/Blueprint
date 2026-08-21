@@ -77,6 +77,7 @@ window.APP_CONFIG = {
       authors: ["Stephen Svedman"], active: true, auth_kind: "shared",
       role_table: "app_roles", list_rpc: "admin_list_users",
       token_rpc: "admin_add_or_reset", token_pool: "A",
+      delete_rpc: "admin_delete_user",
       roles: ["admin", "editor", "viewer"], division_scoped_roles: ["editor"],
       division_source: { kind: "table", table: "app_divisions" }
     },
@@ -88,6 +89,7 @@ window.APP_CONFIG = {
       authors: ["Stephen Svedman"], active: true, auth_kind: "shared",
       role_table: "tf_app_roles", list_rpc: "tf_admin_list_users",
       token_rpc: "tf_admin_add_or_reset", token_pool: "A",
+      delete_rpc: "tf_admin_delete_user",
       roles: ["admin", "editor", "purchasing", "viewer"],
       division_scoped_roles: ["editor", "purchasing"],
       division_source: { kind: "config", divisions: [
@@ -103,6 +105,11 @@ window.APP_CONFIG = {
       authors: ["Denis Crepes", "Stephen Svedman"], active: true, auth_kind: "shared",
       role_table: "cdb_app_roles", list_rpc: "cdb_admin_list_users",
       token_rpc: "cdb_admin_add_or_reset", token_pool: "B",
+      // Community-DB has no delete function in the database. Removing a login is
+      // a single global act, so one app that offers one is enough — but a role
+      // row here still has to be cleared first, and only a Community-DB admin
+      // can do that. buildRemovalPlan() refuses rather than orphaning it.
+      delete_rpc: null,
       roles: ["admin", "editor", "viewer"], division_scoped_roles: [],
       division_source: { kind: "config", divisions: [
         { key: "orlando", label: "Orlando Division", code: "OLH" }
@@ -122,6 +129,7 @@ window.APP_CONFIG = {
       icon_url: "https://ssvedman.github.io/lennar-map/logo.svg",
       authors: ["Stephen Svedman"], active: true, auth_kind: "none",
       role_table: null, list_rpc: null, token_rpc: null, token_pool: null,
+      delete_rpc: null,
       roles: [], division_scoped_roles: [],
       division_source: { kind: "none" },
       data_table: "map_data"

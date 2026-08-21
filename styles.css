@@ -252,6 +252,15 @@ tbody tr:hover{background:var(--blue-050)}
 .warnbox ul{margin:6px 0 0;padding-left:18px}
 .warnbox li{margin:3px 0}
 
+/* Deleting a login sits below the Save row, fenced off. Same shape as .panel-inset
+   so it reads as part of the modal rather than an alert, with a red edge so it is
+   never mistaken for another way to save. */
+.dangerzone{border:1px solid #f0c9c4;border-left:3px solid var(--bad);border-radius:10px;
+  padding:12px 14px;margin:18px 0 0;background:#fdf7f6}
+.dangerzone>b{color:#a02a20;font-size:13px}
+.dangerzone .hint{margin:4px 0 10px}
+.dangerzone .btn.mini{width:auto;margin:0}
+
 /* ---------- Data Intake ----------
    The drop tile matches the ones in Vendor Assignments and Takeoff Flow, so the
    gesture is the one people already know — the only difference is that this one
@@ -373,6 +382,8 @@ tbody tr:hover{background:var(--blue-050)}
 [data-theme="dark"] .who .av{background:#33415a}
 [data-theme="dark"] .msg.ok,[data-theme="dark"] .risk-ok{background:#173a2b;color:#5ed6a0}
 [data-theme="dark"] .msg.err,[data-theme="dark"] .risk-bad{background:#3a1c1c;color:#f28b8b}
+[data-theme="dark"] .dangerzone{background:#2b1a19;border-color:#5a2a26}
+[data-theme="dark"] .dangerzone>b{color:#f28b8b}
 [data-theme="dark"] .kpi.warn,[data-theme="dark"] .warnbox,
 [data-theme="dark"] .risk-warn,[data-theme="dark"] .pubtag{
   background:#33280f;color:#e9b866;border-color:#5a4420}

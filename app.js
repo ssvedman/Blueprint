@@ -17,7 +17,7 @@
   const state = {
     email: null, apps: [], fallback: false, users: [], me: null,
     adminSlugs: [], isAdmin: false, tab: "apps", appsMode: "tiles",
-    query: "", divisions: {}, health: null
+    query: "", divisions: {}, health: null, userFailures: []
   };
 
   /* ------------------------------------------------------------------ chrome */
@@ -65,6 +65,39 @@
         (ov, close) => {
           ov.querySelector("[data-no]").onclick = () => { close(); resolve(false); };
           ov.querySelector("[data-yes]").onclick = () => { close(); resolve(true); };
+        });
+    });
+  }
+
+  /* Same as confirmBox, but the operator has to type the thing being destroyed
+     before the button works. Reserved for deleting a login: unlike removing an
+     app tile, there is no version of this that can be undone by re-entering a
+     few fields, and the row it acts on is one click away from the row above it
+     in a table of colleagues. */
+  function confirmTyped(title, bodyHtml, phrase, okText) {
+    return new Promise(resolve => {
+      modal(title,
+        bodyHtml +
+        '<label class="fld" style="margin-top:14px">Type <b>' + esc(phrase) +
+        "</b> to confirm</label>" +
+        '<input type="text" data-phrase autocomplete="off" spellcheck="false">' +
+        '<div class="modal-actions"><button class="btn ghost" data-no>Cancel</button>' +
+        '<button class="btn danger" data-yes disabled>' + esc(okText || "OK") + "</button></div>",
+        (ov, close) => {
+          const input = ov.querySelector("[data-phrase]");
+          const yes = ov.querySelector("[data-yes]");
+          // Compared case-insensitively and trimmed: this is a confirmation of
+          // intent, not a password, and an address pasted from Outlook arrives
+          // with stray whitespace and sometimes different case.
+          const check = () => {
+            yes.disabled = input.value.trim().toLowerCase() !== (phrase || "").toLowerCase();
+          };
+          input.oninput = check;
+          input.onkeydown = e => { if (e.key === "Enter" && !yes.disabled) yes.click(); };
+          ov.querySelector("[data-no]").onclick = () => { close(); resolve(false); };
+          yes.onclick = () => { if (yes.disabled) return; close(); resolve(true); };
+          check();
+          input.focus();
         });
     });
   }
@@ -778,6 +811,9 @@
     const { rows, failures } = await DB.loadUsers(state.apps);
     if (stale()) return;          // user switched tabs while this was loading
     state.users = rows;
+    // Kept, not just rendered: an app whose roles could not be read may hold a
+    // row we do not know about, which is enough to refuse a removal.
+    state.userFailures = failures.map(f => f.app);
 
     const managed = BP.managedApps(state.apps);
     const shown = BP.filterUsers(rows, state.query);
@@ -811,7 +847,9 @@
       '<div class="panel-b" style="border-top:1px solid var(--line)"><p class="hint" style="margin:0">' +
       "“implicit” means no row in that app's role table — everyone at " + esc(CFG.ALLOWED_DOMAIN) +
       " can read by default. Roles are independent per app: an editor in one need not be an editor " +
-      "in another, and there is deliberately no control that changes all of them at once." +
+      "in another, and there is deliberately no control that changes all of them at once. " +
+      "To take someone off entirely, open Manage access and use Remove access — clearing " +
+      "every role only drops them to implicit viewer, which is not the same thing." +
       "</p></div></div>";
 
     html += '<div class="panel"><div class="panel-h">Outstanding invites<span class="sp"></span>' +
@@ -913,7 +951,13 @@
 
       '<div id="acMsg" class="msg"></div><div id="acOut"></div>' +
       '<div class="modal-actions"><button class="btn ghost" data-no>Cancel</button>' +
-      '<button class="btn" data-yes>' + (isNew ? "Create access" : "Save changes") + "</button></div>";
+      '<button class="btn" data-yes>' + (isNew ? "Create access" : "Save changes") + "</button></div>" +
+
+      /* Offboarding lives here rather than on the table row for the same reason
+         everything else does: a person's access is one thing, edited in one
+         place. Below the actions and boxed off, because it is not a variant of
+         Save — it is the end of the account. */
+      (isNew ? "" : removeZoneHtml(email));
 
     modal(isNew ? "Add a user" : "Manage access", body, (ov, close) => {
       // enable/disable division checkboxes to match the chosen role
@@ -932,7 +976,83 @@
 
       ov.querySelector("[data-no]").onclick = close;
       ov.querySelector("[data-yes]").onclick = () => saveAccess(ov, isNew, email, managed);
+
+      const rm = ov.querySelector("[data-remove-user]");
+      if (rm) rm.onclick = () => { close(); doRemoveUser(email); };
     });
+  }
+
+  /* ------------------------------- remove access ---------------------------
+     "Remove access" means the login, not the roles. Dropping every app to
+     implicit viewer looks like removal and is not: everyone at ALLOWED_DOMAIN
+     keeps read access by default, so the one thing that actually takes access
+     away is deleting the shared auth row — which is what the sibling apps'
+     "Delete the login" buttons have always done, and what Blueprint could not.
+     ---------------------------------------------------------------------- */
+
+  function removeZoneHtml(email) {
+    const plan = BP.buildRemovalPlan(email, state.users, state.apps, {
+      operatorEmail: state.email,
+      operatorAdminSlugs: state.adminSlugs,
+      failedApps: state.userFailures
+    });
+
+    // A refusal is shown, not hidden. A greyed-out button with no reason is how
+    // someone concludes the feature is broken and goes looking for a workaround.
+    return '<div class="dangerzone"><b>Remove access</b>' +
+      '<p class="hint">Deletes their login, so they cannot sign in to any tool. ' +
+      "Clearing roles above only drops them to implicit viewer.</p>" +
+      (plan.ok
+        ? '<button class="btn danger mini" data-remove-user>Remove access…</button>'
+        : '<p class="msg err" style="display:block;margin:0">' + esc(plan.error) + "</p>") +
+      "</div>";
+  }
+
+  async function doRemoveUser(email) {
+    const plan = BP.buildRemovalPlan(email, state.users, state.apps, {
+      operatorEmail: state.email,
+      operatorAdminSlugs: state.adminSlugs,
+      failedApps: state.userFailures
+    });
+    if (!plan.ok) return toast(plan.error, "err");
+
+    const body =
+      "<p>Remove <b>" + esc(plan.email) + "</b> from every tool?</p>" +
+      '<div class="warnbox"><b>What this does</b><ul>' +
+        (plan.clears.length
+          ? "<li>Deletes their role in " +
+            plan.clears.map(c => "<b>" + esc(c.name) + "</b> (" + esc(c.role) + ")").join(", ") +
+            ".</li>"
+          : "<li>They hold no explicit role anywhere, so no role row is deleted.</li>") +
+        "<li>Deletes the shared login, so they can no longer sign in to " +
+        "<b>any</b> of the tools — not just the ones they had a role in.</li>" +
+        "<li>Cannot be undone. Coming back means a fresh invite and re-granting " +
+        "every role by hand.</li>" +
+      "</ul></div>" +
+      (plan.orphanedAdmins.length
+        ? '<div class="warnbox"><b>They are the only admin in ' +
+          plan.orphanedAdmins.map(esc).join(" and ") + "</b><ul><li>Removing them leaves " +
+          (plan.orphanedAdmins.length > 1 ? "those apps" : "that app") +
+          " with nobody who can grant roles or mint credential links. " +
+          "Promote someone else first if that is not intended.</li></ul></div>"
+        : "") +
+      '<div class="panel-inset"><b>What this does not do</b>' +
+      '<ul style="margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--muted)">' +
+        "<li>Nothing they uploaded, published or edited is deleted. Change-log " +
+        "entries keep their name.</li>" +
+        "<li>Any credential link already generated for this address stays in the " +
+        "token table — Blueprint has no access to it. Check <b>Outstanding " +
+        "invites</b> below afterwards.</li>" +
+      "</ul></div>" +
+      '<p class="hint">Deleted via ' + esc(plan.viaApp) + ", the app you are an admin in. " +
+      "One login is shared across the suite, so this removes them everywhere.</p>";
+
+    if (!(await confirmTyped("Remove " + plan.email, body, plan.email, "Remove access"))) return;
+
+    const r = await DB.removeUser(plan, state.apps);
+    if (!r.ok) return toast(r.error, "err");
+    toast(plan.email + " removed — their login is deleted", "ok");
+    render();
   }
 
   function readAccess(ov, managed) {

@@ -12,7 +12,7 @@ what.
 - **Data Intake** — one place to drop the weekly workbooks, which then update every
   tool that needs them, for named maintainers only.
 - **Users** — administrators manage each person's access per app, including division
-  scope, and issue sign-in links for new users.
+  scope, issue sign-in links, and remove access entirely.
 - **Health** — a read-only status view across the tools, open to everyone.
 
 ## Data Intake

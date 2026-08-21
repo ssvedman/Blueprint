@@ -115,6 +115,13 @@ create table if not exists public.hub_apps (
   list_rpc     text,
   token_rpc    text,
   token_pool   text check (token_pool in ('A','B')),
+
+  -- The function that deletes a login. Not part of the all-or-nothing wiring
+  -- below, because it is genuinely optional: Community-DB never got one, and one
+  -- app that offers a delete is enough — every app in the suite shares a single
+  -- auth.users row, so deleting it anywhere deletes it everywhere. Blueprint
+  -- clears the role rows itself before calling this.
+  delete_rpc   text,
   roles        text[] not null default '{}',
   division_scoped_roles text[] not null default '{}',
   division_source jsonb not null default '{"kind":"none"}'::jsonb,
@@ -136,6 +143,12 @@ create table if not exists public.hub_apps (
     (role_table is null and list_rpc is null and token_rpc is null and token_pool is null)
     or
     (role_table is not null and list_rpc is not null and token_rpc is not null and token_pool is not null)
+  ),
+
+  -- A launcher-only tile has no role table, so it has nothing to delete FROM
+  -- and naming a delete function there would be meaningless wiring.
+  constraint hub_apps_delete_needs_roles check (
+    delete_rpc is null or role_table is not null
   )
 );
 
@@ -188,6 +201,7 @@ begin
     new.list_rpc              := old.list_rpc;
     new.token_rpc             := old.token_rpc;
     new.token_pool            := old.token_pool;
+    new.delete_rpc            := old.delete_rpc;
     new.roles                 := old.roles;
     new.division_scoped_roles := old.division_scoped_roles;
     new.division_source       := old.division_source;
@@ -205,6 +219,7 @@ begin
        and not public.hub_is_service() then
       new.role_table := null; new.list_rpc := null;
       new.token_rpc := null;  new.token_pool := null;
+      new.delete_rpc := null;
       new.roles := '{}';      new.division_scoped_roles := '{}';
       new.division_source := '{"kind":"none"}'::jsonb;
       new.data_table := null;
@@ -223,6 +238,21 @@ create trigger hub_apps_touch_trg before insert or update on public.hub_apps
    so a column added later has to be added explicitly. Idempotent, so re-running
    this file stays safe. */
 alter table public.hub_apps add column if not exists data_table text;
+
+/* Offboarding. Added after the fact, so both the column and its constraint have
+   to be applied explicitly, and the two apps that have a delete function need
+   backfilling — the seed below only writes wiring on a first insert. Guarded on
+   `is null` so a later hand-edit here is not stamped back over on a re-run. */
+alter table public.hub_apps add column if not exists delete_rpc text;
+do $$ begin
+  alter table public.hub_apps add constraint hub_apps_delete_needs_roles
+    check (delete_rpc is null or role_table is not null);
+exception when duplicate_object then null; end $$;
+
+update public.hub_apps set delete_rpc = 'admin_delete_user'
+  where slug = 'Vendor-Portal' and delete_rpc is null;
+update public.hub_apps set delete_rpc = 'tf_admin_delete_user'
+  where slug = 'Takeoff-Flow' and delete_rpc is null;
 
 /* RLS ---------------------------------------------------------------------- */
 
@@ -312,7 +342,8 @@ grant execute on function public.hub_pending_invites() to authenticated;
 
 insert into public.hub_apps
   (slug, name, url, description, icon_url, authors, active, auth_kind,
-   data_table, role_table, list_rpc, token_rpc, token_pool, roles, division_scoped_roles, division_source)
+   data_table, role_table, list_rpc, token_rpc, token_pool, delete_rpc,
+   roles, division_scoped_roles, division_source)
 values
   ('Vendor-Portal', 'Vendor Assignments',
    'https://ssvedman.github.io/Vendor-Portal/',
@@ -320,7 +351,7 @@ values
    'https://ssvedman.github.io/Vendor-Portal/logo.svg',
    array['Stephen Svedman'], true, 'shared',
    null,
-   'app_roles', 'admin_list_users', 'admin_add_or_reset', 'A',
+   'app_roles', 'admin_list_users', 'admin_add_or_reset', 'A', 'admin_delete_user',
    array['admin','editor','viewer'], array['editor'],
    '{"kind":"table","table":"app_divisions"}'::jsonb),
 
@@ -330,7 +361,7 @@ values
    'https://ssvedman.github.io/Takeoff-Flow/logo.svg',
    array['Stephen Svedman'], true, 'shared',
    null,
-   'tf_app_roles', 'tf_admin_list_users', 'tf_admin_add_or_reset', 'A',
+   'tf_app_roles', 'tf_admin_list_users', 'tf_admin_add_or_reset', 'A', 'tf_admin_delete_user',
    array['admin','editor','purchasing','viewer'], array['editor','purchasing'],
    '{"kind":"config"}'::jsonb),
 
@@ -340,7 +371,7 @@ values
    'https://ssvedman.github.io/Community-DB/logo.svg',
    array['Denis Crepes','Stephen Svedman'], true, 'shared',
    null,
-   'cdb_app_roles', 'cdb_admin_list_users', 'cdb_admin_add_or_reset', 'B',
+   'cdb_app_roles', 'cdb_admin_list_users', 'cdb_admin_add_or_reset', 'B', null,
    array['admin','editor','viewer'], array[]::text[],
    '{"kind":"config"}'::jsonb),
 
@@ -354,7 +385,7 @@ values
    'https://ssvedman.github.io/lennar-map/logo.svg',
    array['Stephen Svedman'], true, 'none',
    'map_data',
-   null, null, null, null, array[]::text[], array[]::text[],
+   null, null, null, null, null, array[]::text[], array[]::text[],
    '{"kind":"none"}'::jsonb)
 
 on conflict (slug) do update set
@@ -380,6 +411,8 @@ declare
   v_rls      boolean;
   v_policies int;
   v_anon     int;
+  v_delete   int;
+  v_missing  text;
 begin
   select relrowsecurity into v_rls
     from pg_class where oid = 'public.hub_apps'::regclass;
@@ -399,6 +432,25 @@ begin
    where table_schema = 'public' and table_name = 'hub_apps' and grantee = 'anon';
   if v_anon > 0 then
     raise exception 'SECURITY: anon still holds % privileges on public.hub_apps', v_anon;
+  end if;
+
+  /* Offboarding needs at least one installed delete function to point at. A
+     notice, not an exception: a registry with none is a Blueprint that cannot
+     remove logins, which is a gap worth naming but not a reason to refuse the
+     rest of the setup. Named functions are checked too — a delete_rpc pointing
+     at nothing fails at the moment an admin is trying to offboard someone,
+     which is the worst possible time to discover it. */
+  select count(*) into v_delete from public.hub_apps where delete_rpc is not null;
+  if v_delete = 0 then
+    raise notice 'Blueprint: no app declares delete_rpc — Remove access will be unavailable.';
+  else
+    select string_agg(a.delete_rpc, ', ') into v_missing
+      from public.hub_apps a
+     where a.delete_rpc is not null
+       and to_regprocedure('public.' || a.delete_rpc || '(text)') is null;
+    if v_missing is not null then
+      raise notice 'Blueprint: delete_rpc names a function that is not installed: %', v_missing;
+    end if;
   end if;
 
   raise notice 'Blueprint: RLS enabled, % policies, anon has no table privileges.', v_policies;
