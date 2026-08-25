@@ -448,17 +448,19 @@ window.BPDB = (function () {
 
   async function flowExisting(division) {
     const { data, error } = await client.from("flow_rows")
-      .select("id,community_name,community_num,plan,elevation,first_trench_date,plan_name,sort_order")
+      .select("id,community_name,community_num,plan,elevation,first_trench_date,last_trench_date,plan_name,sort_order")
       .eq("division", division);
     if (error) return { ok: false, error: friendly(error), rows: [] };
     return { ok: true, rows: data || [] };
   }
 
-  /* Adds new rows and nudges first_trench_date on existing ones. Existing rows are
-     never replaced wholesale — an editor's manual overrides in the grid have to
-     survive an import, which is why the update is a partial upsert of two columns
-     and not the parsed row. */
-  async function flowPublish(division, fresh, updates, entry, email) {
+  /* Adds new rows and nudges first_trench_date / last_trench_date on existing
+     ones. Existing rows are never replaced wholesale — an editor's manual
+     overrides in the grid have to survive an import, which is why the update is
+     a partial upsert of a few columns and not the parsed row. last_trench_date
+     mirrors the current log's latest start per row and drives the red status on
+     the Takeoff Flow Plans tab. */
+  async function flowPublish(division, fresh, updates, lastUpdates, entry, email) {
     try {
       const ex = await flowExisting(division);
       if (!ex.ok) return { ok: false, error: ex.error };
@@ -475,10 +477,12 @@ window.BPDB = (function () {
       // One row per id: the planner already collapsed duplicates, but a batch that
       // touched the same id twice would fail the whole upsert.
       const byId = new Map();
-      (updates || []).forEach(u => byId.set(u.id, u));
+      (updates || []).forEach(u => byId.set(u.id, { id: u.id, trTo: u.trTo }));
+      (lastUpdates || []).forEach(u => { const cur = byId.get(u.id) || { id: u.id }; cur.lastTo = u.to; byId.set(u.id, cur); });
       const updRows = [...byId.values()].map(u => {
         const row = { id: u.id, division, updated_at: now, updated_by: email };
         if (u.trTo) row.first_trench_date = u.trTo;
+        if (u.lastTo) row.last_trench_date = u.lastTo;
         return row;
       });
 
@@ -492,7 +496,8 @@ window.BPDB = (function () {
       });
 
       return {
-        ok: true, added: newRows.length, updated: updRows.length,
+        ok: true, added: newRows.length, updated: (updates || []).length,
+        refreshed: (lastUpdates || []).length,
         historyWritten: !logErr, historyError: logErr ? friendly(logErr) : null
       };
     } catch (err) {

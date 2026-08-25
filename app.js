@@ -1455,8 +1455,11 @@
         t.plan = BPI.planFlowImport(startsRec.parsed.tf.rows, ex.rows);
         t.entry = BPI.flowChangeEntry(t.plan, t.division, "Starts Log");
         t.guard = { blocking: [], warnings: [], notes: [] };
-        if (!t.plan.fresh.length && !t.plan.updates.length) {
+        const lastN = (t.plan.lastUpdates || []).length;
+        if (!t.plan.fresh.length && !t.plan.updates.length && !lastN) {
           t.guard.notes.push("Nothing new in this log — every combination is already in the grid.");
+        } else if (!t.plan.fresh.length && !t.plan.updates.length) {
+          t.guard.notes.push("No new rows or trench moves — publishing refreshes each plan's latest start date, which drives the red status on the Takeoff Flow Plans tab.");
         }
       }
 
@@ -1847,11 +1850,13 @@
       stats = intakeKpis([
         [t.plan.fresh.length, "New rows"],
         [t.plan.updates.length, "Trench updates"],
+        [(t.plan.lastUpdates || []).length, "Latest-start refreshes"],
         [t.plan.newCommunities.length, "New communities"],
         [t.plan.parsed, "Parsed"]
       ]);
       detail = '<p class="hint">Existing rows keep their manual edits — only a First Trench date ' +
-               "that moved earlier is changed.</p>";
+               "that moved earlier is changed. Latest-start dates are refreshed from this log; " +
+               "a plan with no start from today forward shows red on the Takeoff Flow Plans tab.</p>";
       if (t.plan.newCommunities.length) {
         detail += '<p class="hint">New: ' +
           t.plan.newCommunities.slice(0, 8).map(esc).join(", ") +
@@ -1935,7 +1940,7 @@
      should read as "nothing to publish" rather than offering a button that writes
      an empty history entry. */
   function intakeNothingToDo(t) {
-    if (t.target === "takeoffFlow") return !t.plan.fresh.length && !t.plan.updates.length;
+    if (t.target === "takeoffFlow") return !t.plan.fresh.length && !t.plan.updates.length && !(t.plan.lastUpdates || []).length;
     if (t.target === "communityMap") {
       /* A coordinate placed on this card is a change the diff cannot see — it
          counts communities and starts, and a placement moves neither. Without
@@ -1977,7 +1982,8 @@
         : "first publish for this division";
     }
     if (t.target === "takeoffFlow") {
-      return "add " + t.plan.fresh.length + " row(s), update " + t.plan.updates.length + " trench date(s)";
+      return "add " + t.plan.fresh.length + " row(s), update " + t.plan.updates.length + " trench date(s)" +
+             ", refresh " + (t.plan.lastUpdates || []).length + " latest-start date(s)";
     }
     if (t.target === "communityMap") {
       return "merge — " + t.mapResult.totals.communities + " communities, +" +
@@ -2004,10 +2010,12 @@
         : { ok: false, message: "Publish failed: " + res.error };
 
     } else if (t.target === "takeoffFlow") {
-      const res = await DB.flowPublish(t.division, t.plan.fresh, t.plan.updates, t.entry, state.email);
+      const res = await DB.flowPublish(t.division, t.plan.fresh, t.plan.updates,
+                                       t.plan.lastUpdates || [], t.entry, state.email);
       intake.results[key] = res.ok
-        ? { ok: true, message: "Added " + res.added + " row(s) and updated " + res.updated +
-              " trench date(s) in " + t.divisionLabel + ".",
+        ? { ok: true, message: "Added " + res.added + " row(s), updated " + res.updated +
+              " trench date(s) and refreshed " + (res.refreshed || 0) +
+              " latest-start date(s) in " + t.divisionLabel + ".",
             historyError: res.historyWritten ? null : res.historyError }
         : { ok: false, message: "Publish failed: " + res.error };
 

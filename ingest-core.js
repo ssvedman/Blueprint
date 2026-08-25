@@ -487,8 +487,11 @@
       const add = (planLabel, evv) => {
         if (!planLabel) return;
         const key = [num, lc(planLabel), lc(evv || "")].join("|");
-        if (!groups.has(key)) groups.set(key, { community_name: name, community_num: num, plan: planLabel, elevation: evv, first_trench_date: trench });
-        else { const g = groups.get(key); if (trench && (!g.first_trench_date || trench < g.first_trench_date)) g.first_trench_date = trench; }
+        if (!groups.has(key)) groups.set(key, { community_name: name, community_num: num, plan: planLabel, elevation: evv, first_trench_date: trench, last_trench_date: trench });
+        else { const g = groups.get(key); if (trench) {
+          if (!g.first_trench_date || trench < g.first_trench_date) g.first_trench_date = trench;
+          if (!g.last_trench_date  || trench > g.last_trench_date ) g.last_trench_date  = trench;
+        } }
       };
       add(plan, ev);
       if (bp && srcPlan && lc(srcPlan) !== lc(plan)) add(srcPlan, ev);
@@ -549,13 +552,19 @@
       if (freshSet.has(p)) return;
       const r = findExisting(p); if (!r) return;
       const nt = p.first_trench_date; if (!nt) return;
+      const lt = p.last_trench_date || nt;
       const cur = agg.get(r.id);
-      if (!cur) agg.set(r.id, { row: r, earliest: nt });
-      else if (nt < cur.earliest) cur.earliest = nt;
+      if (!cur) agg.set(r.id, { row: r, earliest: nt, latest: lt });
+      else { if (nt < cur.earliest) cur.earliest = nt; if (lt > cur.latest) cur.latest = lt; }
     });
 
     const updates = [];
-    agg.forEach(({ row: r, earliest }) => {
+    // last_trench_date mirrors the CURRENT log's latest start per row — it may move
+    // backward when future lots are dropped. The Takeoff Flow Plans tab flags a
+    // plan red only when this date is before today, so every Starts Log import
+    // refreshes it (matches Takeoff Flow's own admin import).
+    const lastUpdates = [];
+    agg.forEach(({ row: r, earliest, latest }) => {
       if (earliest !== (r.first_trench_date || null)) {
         updates.push({
           id: r.id,
@@ -564,13 +573,14 @@
           trFrom: r.first_trench_date || "", trTo: earliest
         });
       }
+      if (latest && latest !== (r.last_trench_date || null)) lastUpdates.push({ id: r.id, to: latest });
     });
 
     const byComm = new Map();
     fresh.forEach(r => byComm.set(r.community_name, (byComm.get(r.community_name) || 0) + 1));
     const newComms = [...new Set(fresh.filter(p => !existingNums.has(String(p.community_num || "").trim())).map(p => p.community_name))];
 
-    return { fresh, updates, parsed: proposed.length, communities: byComm.size, newCommunities: newComms };
+    return { fresh, updates, lastUpdates, parsed: proposed.length, communities: byComm.size, newCommunities: newComms };
   }
 
   /* Build the summary and detail written to tf_change_log. The "What's New" panel
@@ -582,6 +592,7 @@
     const parts = [];
     if (plan.fresh.length) parts.push(`${plan.fresh.length} new row(s)`);
     if (plan.updates.length) parts.push(`${plan.updates.length} trench update(s)`);
+    if (plan.lastUpdates && plan.lastUpdates.length) parts.push(`${plan.lastUpdates.length} latest-start refresh(es)`);
     const summary = `Imported ${parts.join(" + ")} from ${source} → ${div}`
                   + (plan.communities ? ` · ${plan.communities} communities` : "")
                   + (plan.newCommunities.length ? `, ${plan.newCommunities.length} new` : "");
