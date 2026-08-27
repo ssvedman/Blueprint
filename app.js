@@ -1532,7 +1532,11 @@
           startsAgg, idName,
           re2: divRe2 || null,
           contacts, dataStart,
-          notes: find.notes, problems: find.problems
+          notes: find.notes, problems: find.problems,
+          /* Supplying the channel is what routes advisory findings (an area
+             manager the directory has no details for) away from blocking —
+             see the comment at buildDocument. */
+          warnings: []
         });
 
         /* Kept so a coordinate entered below can be re-diffed against the same
@@ -1563,7 +1567,7 @@
 
         t.guard = {
           blocking: t.mapResult.problems,
-          warnings: [],
+          warnings: (t.mapResult.warnings || []).slice(),
           notes: t.mapResult.notes
         };
         if (!contactsRec) {
