@@ -2428,9 +2428,30 @@
         let st = up ? "ok" : "bad";
 
         if (BP.hasVisibleData(app)) {
-          const m = await DB.mapHealth("orlando");
-          if (stale()) return;
+          /* Every division the map covers, not just the first one. Health used
+             to call mapHealth("orlando") flat out, so Tampa could publish 104
+             communities with 52 of them missing coordinates and this panel went
+             on saying everything was fine — the check silently reported on a
+             subset of what it named. Divisions are labelled in the rows only
+             when there is more than one, so the single-division reading is
+             unchanged. */
+          const mapDivs = mapDivisions();
+          const reports = [];
+          for (const d of mapDivs) {
+            const r = await DB.mapHealth(d.key);
+            if (stale()) return;
+            reports.push({ div: d, m: r });
+          }
+          const many = reports.filter(r => r.m.ok && r.m.seeded).length > 1;
 
+          for (const { div, m } of reports) {
+            const tag = many ? div.label + ": " : "";
+            healthRowsForMap(tag, div, m);
+          }
+
+          /* Declared before the loop above runs so the closure can push into the
+             same arrays the rest of this panel builds. */
+          function healthRowsForMap(tag, div, m) {
           if (!m.ok) {
             checks.push(row("Data", "could not read " + app.data_table, "warn"));
             st = worse(st, "warn");
@@ -2444,17 +2465,17 @@
             const sGeo = m.unlocated ? "warn" : "ok";
 
             checks.push(
-              row("Last published", BP.relativeDay(m.publishedAt), sAge,
+              row(tag + "Last published", BP.relativeDay(m.publishedAt), sAge,
                   m.publishedBy ? m.publishedBy.split("@")[0] : null),
-              row("Communities on the map", String(m.plotted)),
+              row(tag + "Communities on the map", String(m.plotted)),
               /* Held-back communities are the metric worth surfacing: they are
                  absent from the map, its counts and its exports, and the only
                  thing that fixes them is somebody entering an address. Reporting
                  the starts alongside is what makes it read as urgent rather than
                  tidy — three communities is a shrug, a hundred starts is not. */
-              row("Awaiting a location", String(m.unlocated), sGeo,
+              row(tag + "Awaiting a location", String(m.unlocated), sGeo,
                   m.unlocated ? m.unlocatedStarts.toLocaleString() + " starts hidden" : null),
-              row("Rolling window from", m.dataStart || "—")
+              row(tag + "Rolling window from", m.dataStart || "—")
             );
 
             /* The one place in Health that WRITES, so it is gated twice.
@@ -2470,7 +2491,7 @@
                The database refuses the write too — map_can_write() — so a
                tampered-with page gets an error rather than a result. This gate
                is about not offering people a button that would fail. */
-            if (m.unlocated && mapAdmin) {
+            if (m.unlocated && mapAdmin && !checks.some(c => c.indexOf('id="hLocate"') !== -1)) {
               checks.push(
                 '<div class="hrow"><span class="hl">Place them</span>' +
                 '<span class="hv"><button class="linkbtn" id="hLocate">' +
@@ -2479,13 +2500,16 @@
             st = worse(worse(st, sAge), sGeo);
 
             if (m.unlocated) {
-              alerts.push(app.name + ": " + m.unlocated + " communit" +
+              alerts.push(app.name + (many ? " (" + div.label + ")" : "") + ": " +
+                m.unlocated + " communit" +
                 (m.unlocated === 1 ? "y is" : "ies are") + " missing coordinates, hiding " +
                 m.unlocatedStarts.toLocaleString() + " starts.");
             }
             if (sAge === "bad") {
-              alerts.push(app.name + " has not been published in " + age + " days.");
+              alerts.push(app.name + (many ? " (" + div.label + ")" : "") +
+                " has not been published in " + age + " days.");
             }
+          }
           }
         } else {
           checks.push(row("Data", "not visible to Blueprint", null, "separate backend"));
@@ -2548,12 +2572,20 @@
      log, and no workbook has been dropped — so this offers the two things that
      work without one: confirm or refuse a proposal a CLI run already recorded,
      and type a coordinate. */
+  /* Which divisions the Community Map covers, derived from the intake
+     requirements rather than listed again here. Two copies of this list is how
+     Health came to report only Orlando while Data Intake published both: the
+     second one was added and the first was not. */
+  function mapDivisions() {
+    return (BPI.REQUIREMENTS.communityMap.divisions || [])
+      .map(k => BPI.divisionByKey(k) || { key: k, label: k });
+  }
+
   async function locateFromHealth(afterAll) {
     /* One panel covers every division on the map; a division with no document
        yet simply is not listed. */
-    const MAP_DIVS = [["orlando", "Orlando"], ["tampa", "Tampa"]];
     const divs = [];
-    for (const [key, label] of MAP_DIVS) {
+    for (const { key, label } of mapDivisions()) {
       const cur = await DB.mapCurrent(key);
       if (!cur.ok) { toast("Could not read the " + label + " map document: " + cur.error, "bad"); return; }
       if (!cur.row || !cur.row.payload) continue;
