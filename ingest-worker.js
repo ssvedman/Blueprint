@@ -136,18 +136,22 @@ self.onmessage = function (e) {
         /* The map wants the same rows shaped differently — community → trade →
            vendor rather than vendor → communities. Done here rather than on the
            page because it is another pass over 144,000 rows, and because the rows
-           are already in memory on this side. Orlando only: the map is
-           single-division.
+           are already in memory on this side. One shape per division on the map
+           (Orlando and Tampa), keyed by division so the page picks its own.
 
            divCounts is handed in so the wrong-file guard still works even though
            the rows have already been filtered to one division. */
         progress(id, "grouping", 80);
-        const mapFind = { notes: [], problems: [] };
-        const olh = bucket.byCode.OLH || [];
-        const mapRe2 = self.MAPCORE.parseRE2(olh, "OLH", mapFind, bucket.counts);
-        // Maps survive structured clone, so they cross intact.
-        out.mapRe2 = { byCommunity: mapRe2.byCommunity, nameHint: mapRe2.nameHint,
-                       notes: mapFind.notes, problems: mapFind.problems };
+        out.mapRe2ByDiv = {};
+        for (const [divKey, code] of [["orlando", "OLH"], ["tampa", "TPU"]]) {
+          const mapFind = { notes: [], problems: [] };
+          const mapRe2 = self.MAPCORE.parseRE2(bucket.byCode[code] || [], code, mapFind, bucket.counts);
+          // Maps survive structured clone, so they cross intact.
+          out.mapRe2ByDiv[divKey] = { byCommunity: mapRe2.byCommunity, nameHint: mapRe2.nameHint,
+                                      notes: mapFind.notes, problems: mapFind.problems };
+        }
+        // Kept for one release so an old page against a new worker still works.
+        out.mapRe2 = out.mapRe2ByDiv.orlando;
 
       } else if (kind === "starts") {
         out.vp = self.BPI.parseStartsVP(wb);
@@ -165,12 +169,16 @@ self.onmessage = function (e) {
 
            The same pass also yields the STREETS, community by community, which is
            how a community that arrives with no coordinate gets placed. Every
-           permit row carries an Address — a real one for an established
+           Orlando permit row carries an Address — a real one for an established
            community, "TBD Sunfish Drive" for a brand-new one — and the street is
-           there either way. Collected here because it is the same walk over the
-           same rows; thrown away here, and the page has no way to get it back
-           without re-reading a 7 MB file. */
-        if (division === "orlando") {
+           there either way; a Tampa log without that column simply yields no
+           streets, and those communities get placed by hand or by address.
+           Collected here because it is the same walk over the same rows; thrown
+           away here, and the page has no way to get it back without re-reading a
+           7 MB file. parseStarts already understands both formats (Comm/Start
+           columns for Orlando's Permit Log, Project/ActStart for Tampa's Start
+           Log), so both divisions run through the same pass. */
+        {
           progress(id, "parsing", 80);
           const X = self.XLSX;
           const sheet = self.BPI.pickStartsSheetVP(allSheetNames).sheet;

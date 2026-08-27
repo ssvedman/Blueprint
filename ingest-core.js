@@ -619,7 +619,7 @@
   const REQUIREMENTS = {
     vendorPortal: { needs: ["re2", "starts"], label: "Vendor Assignments" },
     takeoffFlow:  { needs: ["starts"],        label: "Takeoff Flow" },
-    communityMap: { needs: ["re2", "starts"], label: "Community Map", divisions: ["orlando"], optional: ["contacts"] }
+    communityMap: { needs: ["re2", "starts"], label: "Community Map", divisions: ["orlando", "tampa"], optional: ["contacts"] }
   };
 
   function missingFor(target, division, present) {

@@ -1473,16 +1473,25 @@
            The same map-core.js the map's own CLI uses does the work, so a publish
            from here and a publish from the command line produce the same document.
            A drift test keeps the two copies identical. */
-        const cur = await DB.mapCurrent("orlando");
+        const cur = await DB.mapCurrent(t.division);
         t.currentError = cur.ok ? null : cur.error;
         if (!cur.ok) continue;
 
-        if (!cur.row || !cur.row.payload) {
-          t.currentError = "No map document is published yet. Seed it once with "
-                         + "tools/seed-supabase.js before publishing from here — "
-                         + "there would be nothing to merge into.";
-          continue;
-        }
+        /* First publish for a division bootstraps its document from empty: the
+           merge then simply adds everything the workbooks describe. map-core's
+           growth guard keys off the EXISTING count and never fires on zero, so
+           the bootstrap needs no special exemption. Communities arrive without
+           coordinates and stay off the public map until placed — same as any
+           new community. */
+        t.bootstrap = !(cur.row && cur.row.payload);
+        const baseDoc = t.bootstrap
+          ? { generatedAt: null, updateCadenceDays: 7, dataStart: MAPCORE.currentDataStart(),
+              tradeCats: [], vendors: [], communities: [] }
+          : cur.row.payload;
+        const basePeople = (cur.row && cur.row.people) || { people: {} };
+
+        const divRe2 = (re2.parsed.mapRe2ByDiv && re2.parsed.mapRe2ByDiv[t.division])
+                    || (t.division === "orlando" ? re2.parsed.mapRe2 : null);
 
         const find = { notes: [], problems: [] };
         const dataStart = MAPCORE.currentDataStart();
@@ -1492,11 +1501,13 @@
         const idName = (startsRec.parsed.mapStarts || {}).idName || {};
 
         // Carry the worker's findings across so nothing it noticed is lost.
-        for (const src of [startsRec.parsed.mapStarts, re2.parsed.mapRe2]) {
+        for (const src of [startsRec.parsed.mapStarts, divRe2]) {
           if (!src) continue;
           find.notes.push(...(src.notes || []));
           find.problems.push(...(src.problems || []));
         }
+        if (t.bootstrap) find.notes.push("First publish for " + t.divisionLabel
+          + " — the map document is being created from this drop.");
 
         /* Contacts are matched by NAME against the communities that will exist
            after this run, so this has to happen here rather than in the worker —
@@ -1504,7 +1515,7 @@
            nothing. */
         let contacts = null;
         if (contactsRec) {
-          const names = new Set((cur.row.payload.communities || []).map(c => c.name));
+          const names = new Set((baseDoc.communities || []).map(c => c.name));
           if (startsAgg) for (const id of startsAgg.keys()) names.add(idName[id] || id);
           try {
             contacts = MAPCORE.parseContacts(contactsRec.parsed.rows, [...names], find);
@@ -1516,10 +1527,10 @@
         }
 
         t.mapResult = MAPCORE.buildDocument({
-          data: cur.row.payload,
-          people: cur.row.people || { people: {} },
+          data: baseDoc,
+          people: basePeople,
           startsAgg, idName,
-          re2: re2.parsed.mapRe2 || null,
+          re2: divRe2 || null,
           contacts, dataStart,
           notes: find.notes, problems: find.problems
         });
@@ -1528,9 +1539,9 @@
            baseline. Recomputing the diff after a placement is the difference
            between the card saying "3 awaiting a location" and it still saying 3
            after you have just placed one. */
-        t.currentPayload = cur.row.payload;
+        t.currentPayload = baseDoc;
 
-        t.diff = MAPCORE.diffDocument(cur.row.payload, t.mapResult.next);
+        t.diff = MAPCORE.diffDocument(baseDoc, t.mapResult.next);
 
         /* Which communities are still off the map, and what there is to go on for
            each: the streets the permit log gave us, anything a previous run
@@ -1545,7 +1556,7 @@
            normal week nothing is. Never fatal: a failure here costs context on a
            screen, not the import. */
         if (t.pending.length) {
-          const loc = await DB.mapLocalities("orlando");
+          const loc = await DB.mapLocalities(t.division);
           t.localityError = loc.ok ? null : loc.error;
           attachLocalities(t.pending, loc.by);
         }
@@ -2534,48 +2545,57 @@
      work without one: confirm or refuse a proposal a CLI run already recorded,
      and type a coordinate. */
   async function locateFromHealth(afterAll) {
-    const cur = await DB.mapCurrent("orlando");
-    if (!cur.ok) { toast("Could not read the map document: " + cur.error, "bad"); return; }
-    if (!cur.row || !cur.row.payload) { toast("No map document is published yet.", "bad"); return; }
+    /* One panel covers every division on the map; a division with no document
+       yet simply is not listed. */
+    const MAP_DIVS = [["orlando", "Orlando"], ["tampa", "Tampa"]];
+    const divs = [];
+    for (const [key, label] of MAP_DIVS) {
+      const cur = await DB.mapCurrent(key);
+      if (!cur.ok) { toast("Could not read the " + label + " map document: " + cur.error, "bad"); return; }
+      if (!cur.row || !cur.row.payload) continue;
+      /* Localities read once per division, before the panel opens. They do not
+         change while it is up, and re-reading on every re-render would put a
+         query behind every keystroke's worth of progress. */
+      const loc = await DB.mapLocalities(key);
+      divs.push({ key, label, doc: cur.row.payload, people: cur.row.people, loc, shown: [] });
+    }
+    if (!divs.length) { toast("No map document is published yet.", "bad"); return; }
 
-    const doc = cur.row.payload;
     let touched = 0;
 
-    /* Read once, before the panel opens. It does not change while the panel is
-       up, and re-reading it on every re-render would put a query behind every
-       keystroke's worth of progress. */
-    const loc = await DB.mapLocalities("orlando");
-    let shown = [];
-
     const bodyHtml = () => {
-      const pending = attachLocalities(MAPCORE.pendingLocations(doc, {}), loc.by);
-      shown = pending;
-      if (!pending.length) {
-        return '<p>Every community on the map has a coordinate.</p>';
-      }
-      return locateListHtml(pending, "hlo", true,
-        "Each one is saved the moment you place it — there is no publish step here. " +
-        "Street names come from the permit log, so they are not available on this " +
-        "screen; run <code>tools/locate-communities.js</code> in the map repo to " +
-        "resolve them automatically." +
-        (loc.ok ? "" : " Community-DB could not be read (" + esc(loc.error) +
-                       "), so the towns below are missing."), false);
+      let any = false, h = "";
+      divs.forEach((d, i) => {
+        const pending = attachLocalities(MAPCORE.pendingLocations(d.doc, {}), d.loc.by);
+        d.shown = pending;
+        if (!pending.length) return;
+        any = true;
+        if (divs.length > 1) h += '<h4 style="margin:14px 0 6px">' + esc(d.label) + "</h4>";
+        h += locateListHtml(pending, "hlo" + i, true,
+          "Each one is saved the moment you place it — there is no publish step here. " +
+          "Street names come from the permit log, so they are not available on this " +
+          "screen; run <code>tools/locate-communities.js</code> in the map repo to " +
+          "resolve them automatically." +
+          (d.loc.ok ? "" : " Community-DB could not be read (" + esc(d.loc.error) +
+                         "), so the towns below are missing."), false);
+      });
+      return any ? h : "<p>Every community on the map has a coordinate.</p>";
     };
 
     modal("Communities awaiting a location", bodyHtml(), (ov) => {
-      const wire = () => bindLocate(ov, "hlo",
-        num => (doc.communities || []).find(c => c.num === num),
+      const wire = () => divs.forEach((d, i) => bindLocate(ov, "hlo" + i,
+        num => (d.doc.communities || []).find(c => c.num === num),
         async (num, what) => {
           const body = ov.querySelector(".modal-body");
           if (what.kind === "rejected") {
             // A rejection changes no coordinate, but it must still be persisted
             // or the next import asks the same question again.
-            const res = await DB.mapPublish("orlando", "Orlando", doc, cur.row.people,
+            const res = await DB.mapPublish(d.key, d.label, d.doc, d.people,
               { rejected: [what.name], via: "health" }, state.email);
             if (!res.ok) { toast("Could not save: " + res.error, "bad"); return; }
             toast(what.name + " left unplaced — that point will not be offered again");
           } else {
-            const res = await DB.mapPublish("orlando", "Orlando", doc, cur.row.people,
+            const res = await DB.mapPublish(d.key, d.label, d.doc, d.people,
               { located: [what.name], via: "health" }, state.email);
             if (!res.ok) { toast("Could not save: " + res.error, "bad"); return; }
             toast(what.name + " placed at " + what.lat + ", " + what.lon + " — saved", "ok");
@@ -2583,7 +2603,7 @@
           touched++;
           if (body) { body.innerHTML = bodyHtml(); wire(); }
         },
-        state.email, shown);
+        state.email, d.shown));
       wire();
 
       /* Re-running the checks costs a screen of queries, so it happens once when
