@@ -1689,9 +1689,14 @@
        cheap and honest way: it guarantees what you see is the document as it now
        stands, rather than a card that still says three when you have just placed
        one of them. */
-    const mapT = (intake.targets || []).find(t => t.target === "communityMap" && t.mapResult);
-    if (mapT) {
-      bindLocate(body, "ilo",
+    /* EVERY map target, not the first one. `.find()` here was the whole bug:
+       with Orlando and Tampa both in one drop it bound both cards' buttons to
+       Orlando's document, and a Tampa community number looked up in it came
+       back empty — which the handler reports, accurately and unhelpfully, as
+       "no longer in this import". */
+    (intake.targets || []).forEach((mapT, ti) => {
+      if (mapT.target !== "communityMap" || !mapT.mapResult) return;
+      bindLocate(body, "ilo" + ti,
         num => (mapT.mapResult.next.communities || []).find(c => c.num === num),
         async (num, what) => {
           mapT.locatedHere = (mapT.locatedHere || 0) + 1;
@@ -1704,7 +1709,7 @@
           renderIntakeBody();
         },
         state.email, mapT.pending);
-    }
+    });
   }
 
   function intakeFilesHtml() {
@@ -1777,7 +1782,7 @@
 
   function intakeTargetsHtml() {
     if (!intake.targets || !intake.targets.length) return "";
-    const cards = intake.targets.map(t => intakeTargetCard(t)).join("");
+    const cards = intake.targets.map((t, i) => intakeTargetCard(t, i)).join("");
     const ready = intakePublishable();
     const waiting = intake.targets.filter(t => !t.ready).length;
 
@@ -1811,7 +1816,15 @@
       '<div class="panel-b" style="display:grid;gap:12px">' + bar + cards + "</div></div>";
   }
 
-  function intakeTargetCard(t) {
+  /* `ti` is this target's index in intake.targets, and it is what keeps the
+     locate controls of one card apart from another's. With a single map
+     division there was only ever one such card and a bare "ilo" was enough;
+     Tampa made two, and one namespace across both meant the binding pass found
+     every card's buttons and wired them all to whichever division it had looked
+     up — so confirming a Tampa proposal searched the Orlando document and
+     reported the community as no longer in the import. Health has namespaced
+     its copy per division since the day it grew a second one. */
+  function intakeTargetCard(t, ti) {
     const title = esc(t.label) + " — " + esc(t.divisionLabel);
     const result = intake.results[t.target + ":" + t.division];
 
@@ -1916,7 +1929,7 @@
       /* Placing one here edits the document about to be published, so it goes out
          with the same Publish button and the same rollback copy. Nothing is
          written until that is pressed. */
-      detail += locateListHtml(t.pending || [], "ilo", mayPublish,
+      detail += locateListHtml(t.pending || [], "ilo" + ti, mayPublish,
         "Placed here, they go out with this publish. Most communities resolve on " +
         "their own from the permit log's street names — run " +
         "<code>tools/locate-communities.js</code> in the map repo for that. What is " +
