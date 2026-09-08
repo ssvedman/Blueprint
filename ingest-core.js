@@ -159,6 +159,14 @@
 
   const FLOW_SHEET = "FLOW OF TAKEOFFS";
 
+  /* Tampa's contact workbook. Two tabs, and it is recognised by them rather than
+     by its columns: unlike the other four files it has real sheet names, and its
+     header row ("CM", "Cell Number", "ACM") is generic enough that matching on
+     those alone would eventually claim somebody's unrelated roster. Both tabs are
+     named here because the second one is what supplies the area managers. */
+  const TPU_CONTACTS_SHEET = "Construction Assignments";
+  const TPU_ACM_SHEET      = "ACM Assignments";
+
   // Columns that identify a file even when its sheet is called something unhelpful
   // like "Sheet1", which is what both the E1 and Power BI exports produce.
   const RE2_REQUIRED  = ["Division", "Community", "Supplier Desc"];
@@ -177,7 +185,13 @@
   function sheetsNeeded(kind, sheetNames, division) {
     if (kind === "flow")     return [findSheet(sheetNames, FLOW_SHEET)].filter(Boolean);
     if (kind === "re2")      return [sheetNames[0]];
-    if (kind === "contacts") return [sheetNames[0]];
+    if (kind === "contacts") {
+      // Tampa's contacts are spread over two tabs; Orlando's Power BI export is
+      // one, and arrives as "Sheet1".
+      const a = findSheet(sheetNames, TPU_CONTACTS_SHEET);
+      if (a) return [a, findSheet(sheetNames, TPU_ACM_SHEET)].filter(Boolean);
+      return [sheetNames[0]];
+    }
     if (kind === "starts") {
       const want = new Set();
       const tf = (division && TF_STARTS_SHEETS[division]) || null;
@@ -207,6 +221,21 @@
       return { kind: "flow", division: null, why: `sheet "${FLOW_SHEET}" present` };
     }
 
+    /* Tampa's contact workbook, by its tab name. Checked before the Power BI
+       match because it is the more specific test of the two, and checked by
+       sheet name because that is the only thing about this file that is
+       distinctive — see TPU_CONTACTS_SHEET.
+
+       Unlike every other kind, a contact sheet's DIVISION comes from its layout
+       rather than from the operator: the two divisions' sheets are different
+       files from different systems, so there is nothing to choose. That matters
+       because both can be dropped in the same batch and each has to reach its
+       own division's map. */
+    if (findSheet(names, TPU_CONTACTS_SHEET)) {
+      return { kind: "contacts", division: "tampa",
+               why: `sheet "${TPU_CONTACTS_SHEET}" present` };
+    }
+
     // Power BI writes an applied-filters block above the table, so its real header
     // is not row 1 and the columns carry trailing spaces. Match on the block, or
     // on the trailing-space header pair, before anything else claims it.
@@ -214,7 +243,7 @@
     const loose = [...H].map(h => lc(h));
     if (/^applied filters/i.test(firstCell) ||
         (loose.some(h => /^communit/.test(h)) && loose.some(h => /e-?mail/.test(h)))) {
-      return { kind: "contacts", division: null, why: "Power BI contact export layout" };
+      return { kind: "contacts", division: "orlando", why: "Power BI contact export layout" };
     }
 
     if (RE2_REQUIRED.every(has) && hasAny(RE2_TRADE)) {
@@ -626,8 +655,10 @@
     const req = REQUIREMENTS[target];
     const missing = [];
     for (const need of req.needs) {
-      if (need === "re2" && !present.re2) missing.push("the RE2 vendor assignments export");
-      if (need === "starts" && !(present.starts || {})[division]) {
+      if (need === "re2" && !presentFor(present, "re2", division)) {
+        missing.push("the RE2 vendor assignments export");
+      }
+      if (need === "starts" && !presentFor(present, "starts", division)) {
         const d = divisionByKey(division);
         missing.push(`the ${d ? d.label : division} starts log`);
       }
@@ -635,7 +666,23 @@
     return missing;
   }
 
-  /* present: { re2:bool, starts:{orlando:bool,tampa:bool}, contacts:bool, flow:bool }
+  /* Is an input present for this division? `re2` and `flow` are single files
+     covering everything, so a bare boolean is the whole answer. `starts` and
+     `contacts` arrive per division, as { orlando:bool, tampa:bool }.
+
+     Both shapes are accepted for every key. contacts used to be a boolean —
+     there was one contact sheet, Orlando's — and a page still holding the old
+     shape against this function would otherwise read as "Tampa has contacts"
+     for a file that is entirely Orlando. */
+  function presentFor(present, key, division) {
+    const v = (present || {})[key];
+    if (v == null) return false;
+    if (typeof v === "object") return !!v[division];
+    return !!v;
+  }
+
+  /* present: { re2:bool, starts:{orlando:bool,tampa:bool},
+                contacts:{orlando:bool,tampa:bool}, flow:bool }
      Returns one entry per destination × division, each ready or waiting. */
   function planTargets(present) {
     const out = [];
@@ -643,7 +690,8 @@
       const divs = req.divisions || DIVISIONS.map(d => d.key);
       for (const division of divs) {
         const missing = missingFor(target, division, present);
-        const optionalMissing = (req.optional || []).filter(o => !present[o]);
+        const optionalMissing = (req.optional || [])
+          .filter(o => !presentFor(present, o, division));
         out.push({
           target, division,
           label: req.label,
@@ -729,10 +777,11 @@
     lc, digits, S, fixRange, vpDate, tfDate, cleanCommName,
     DIVISIONS, divisionByKey,
     VP_STARTS_SHEETS, TF_STARTS_SHEETS, TF_STARTS_FALLBACKS, FLOW_SHEET,
+    TPU_CONTACTS_SHEET, TPU_ACM_SHEET,
     findSheet, sheetsNeeded, sniff, pickStartsSheetVP,
     re2Rows, bucketRE2, parseStartsVP, buildVendorPayload, diffPayload,
     parseStartsTF, planFlowImport, flowChangeEntry, normPlan, combo,
-    REQUIREMENTS, missingFor, planTargets,
+    REQUIREMENTS, missingFor, presentFor, planTargets,
     SHRINK_REFUSE, SHRINK_WARN, guardVendorPayload, sheetDisagreement
   };
 });

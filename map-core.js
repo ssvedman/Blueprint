@@ -108,6 +108,25 @@
     sanctuary:             ["wellness", "sanctuary"]
   };
 
+  /* The same table for Tampa, kept separate rather than merged into the one
+     above. The two sheets are maintained by different people and a token means
+     whatever its own division's sheet meant by it; one shared table would let an
+     Orlando alias silently reroute a Tampa row, which is the kind of bug that
+     shows up as a manager assigned to a community 90 miles away.
+
+     Expect this to grow. The report names every development the sheet could not
+     match, and a genuine naming difference is fixed by an entry here.          */
+  const TAMPA_COMMUNITY_ALIASES = {
+    /* The sheet spells this community both ways — "Posperity Lakes" on seven
+       rows and "Prosperity Lakes" on two — which would otherwise publish as two
+       communities, one of them with nine managers' worth of assignments split
+       across it. Prosperity is the real name. Fixing it here rather than
+       reporting it means the seven managers land somewhere on the first import;
+       when the sheet is corrected at source this entry becomes a harmless
+       no-op. */
+    posperitylakes: "prosperity"
+  };
+
   // "Westview and Waterlin" · "Meadow Pointe & Hidden Ridge" · "Peace Creek TH / Lake Hamilton"
   const COMMUNITY_SPLIT = /\s+and\s+|\s*&\s*|\s*\/\s*/i;
 
@@ -1528,6 +1547,193 @@
      communities, and a cell can name more than one development. There is no
      community number anywhere in the sheet, so matching is by name.
 
+     ── TWO SHEETS, ONE SHAPE ────────────────────────────────────────────────
+     There are two contact sheets, one per division, and they are not the same
+     file with different rows in it — they come from different systems and were
+     never designed together:
+
+       Orlando  a Power BI export. One tab, an applied-filters block above the
+                header, and the columns Communities / Construction / Phone /
+                Email / ACM's. Read by parseContacts.
+
+       Tampa    a hand-maintained workbook. Two tabs — "Construction
+                Assignments" (CM / Cell Number / ACM / Community Assignment /
+                Hub / Meeting) and "ACM Assignments" (the area managers and the
+                division's DOC, with cell numbers). Read by parseContactsTampa.
+
+     Both produce the SAME result shape, so buildDocument does not know or care
+     which division a contact sheet came from. What differs is confined to the
+     two front-ends: locating the header, naming the columns, and — the one real
+     difference — where a person's identity comes from. Orlando has an Email
+     column; Tampa has none, so the address is derived from the name (see
+     emailFromName). Everything downstream keys on the email local part either
+     way, which is what lets the same person appear in both sheets and resolve
+     to one record.
+
+     The matching and accumulation below are shared deliberately. They were
+     duplicated first, and the copies drifted within a day.
+     ---------------------------------------------------------------------- */
+
+  /* Tampa carries no Email column, and person ids are the email local part, so
+     the address is derived from the name: first token, a dot, last token. That
+     is Lennar's convention and it is right for 82 of the 83 names in the
+     current sheet.
+
+     It is a GUESS, and the two ways it can be wrong are worth naming. A
+     nickname in the sheet produces a wrong address ("Manny Navas" is really
+     manuel.navas@, as the Orlando export proves), and a middle name is dropped
+     ("Jose Manuel Rohena" → jose.rohena). Both are reported by the caller
+     rather than being silently published, because the id derived from a wrong
+     address is also wrong, and a later Orlando export carrying that person's
+     real email would create a second record for the same human.               */
+  const EMAIL_DOMAIN = "lennar.com";
+
+  function emailFromName(name) {
+    const parts = String(name == null ? "" : name).trim().split(/\s+/)
+      .map(p => p.toLowerCase().replace(/[^a-z0-9]/g, ""))
+      .filter(Boolean);
+    if (!parts.length) return null;
+    const local = parts.length === 1
+      ? parts[0]
+      : `${parts[0]}.${parts[parts.length - 1]}`;
+    return `${local}@${EMAIL_DOMAIN}`;
+  }
+
+  /* Short forms of given names, used ONLY to decide that two spellings on the
+     two Tampa tabs are the same person — "Joe Mitchell" on the CM tab against
+     "Joseph Mitchell" on the ACM tab. Both spellings are in the same workbook
+     and refer to somebody visible in it, which is what makes this safe.
+
+     It is deliberately NOT used when deriving an email address. Manny Navas is
+     manuel.navas@ in the Orlando directory, so the temptation is obvious, but
+     expanding a name nobody asked us to expand is how you mail somebody whose
+     legal first name really is Manny. Derivation stays literal; this table only
+     ever matches a name against another name already on the sheet.            */
+  const GIVEN_NAME_SHORT_FORMS = {
+    joe: "joseph", joey: "joseph",
+    mike: "michael", mick: "michael",
+    bob: "robert", bobby: "robert", rob: "robert",
+    bill: "william", billy: "william", will: "william",
+    dave: "david",
+    dan: "daniel", danny: "daniel",
+    chris: "christopher",
+    jim: "james", jimmy: "james",
+    tom: "thomas", tommy: "thomas",
+    rick: "richard", rich: "richard",
+    steve: "stephen", steven: "stephen",
+    tony: "anthony", matt: "matthew", mitch: "mitchell",
+    nick: "nicholas", pete: "peter", sam: "samuel",
+    alex: "alexander", andy: "andrew", drew: "andrew",
+    ben: "benjamin", tim: "timothy", ken: "kenneth",
+    greg: "gregory", jeff: "jeffrey", ed: "edward", eddie: "edward",
+    larry: "lawrence", frank: "francis", charlie: "charles", chuck: "charles",
+    pat: "patrick", ron: "ronald", gabe: "gabriel", manny: "manuel",
+    cory: "corey", kory: "corey"
+  };
+
+  const givenNameKey = g => GIVEN_NAME_SHORT_FORMS[g] || g;
+
+  /* Tampa writes "(813) 564-4661"; Orlando writes "813-434-5527". The map
+     renders whatever it is given, so two divisions' cards would not match. The
+     Orlando form wins because it is what is already published. Anything that is
+     not ten digits is left exactly as it was found rather than mangled. */
+  function normPhone(v) {
+    const d = digits(v);
+    const ten = d.length === 11 && d[0] === "1" ? d.slice(1) : d;
+    if (ten.length !== 10) return S(v);
+    return `${ten.slice(0, 3)}-${ten.slice(3, 6)}-${ten.slice(6)}`;
+  }
+
+  /* Community-name matcher. `aliases` maps a normalized sheet token to the map
+     name PREFIX (or prefixes) it stands for; anything else matches on its own
+     normalized form. Prefix rather than equality because one development covers
+     several phases: "Wellness Ridge" has to reach Wellness 22TH, Wellness 32
+     and the rest. */
+  function makeMatcher(communityNames, aliases) {
+    const targets = communityNames.map(n => ({ name: n, n: normName(n) }));
+    return function matchToken(tok) {
+      const t = normName(tok);
+      if (!t) return [];
+      let keys = aliases[t] || t;
+      if (!Array.isArray(keys)) keys = [keys];
+      return targets.filter(c => keys.some(k => c.n.startsWith(k))).map(c => c.name);
+    };
+  }
+
+  /* The accumulator both front-ends feed, one row at a time. It owns every rule
+     about what gets published: the person record, the fan-out across matched
+     communities, sheet order within a community, and the fact that a manager
+     whose row matched nothing is not published at all. */
+  function contactAccumulator(matchToken, ignoredDevs) {
+    const st = {
+      people: {},                 // id -> person
+      cmsFor: new Map(),          // community -> [ids], in sheet order
+      acmFor: new Map(),          // community -> Set(acm name)
+      unmatched: new Set(),
+      ignored: new Set(),
+      acmNames: new Set(),
+      rowCount: 0
+    };
+
+    st.add = function ({ comms, name, phone, email, acm }) {
+      if (!comms || !name || !email) return;
+      st.rowCount++;
+
+      const id = personIdFor(email);
+      if (!st.people[id]) {
+        st.people[id] = {
+          name,
+          phone: phone == null ? null : phone,
+          email: email.toLowerCase(),    // the source mixes casing
+          roles: ["cm"]
+        };
+      }
+
+      if (acm) st.acmNames.add(acm);
+
+      let hitAny = false;
+      for (const tok of String(comms).split(COMMUNITY_SPLIT)) {
+        const t = tok.trim();
+        if (!t) continue;
+        const hits = matchToken(t);
+        if (!hits.length) {
+          if (normName(t) in ignoredDevs) st.ignored.add(t);
+          else st.unmatched.add(t);
+          continue;
+        }
+        hitAny = true;
+        for (const c of hits) {
+          if (!st.cmsFor.has(c)) st.cmsFor.set(c, []);
+          if (!st.cmsFor.get(c).includes(id)) st.cmsFor.get(c).push(id);
+          if (acm) {
+            if (!st.acmFor.has(c)) st.acmFor.set(c, new Set());
+            st.acmFor.get(c).add(acm);
+          }
+        }
+      }
+      if (!hitAny) delete st.people[id];   // nobody references them; do not publish them
+    };
+
+    st.finish = function (find, label) {
+      find.notes.push(`${label}: ${st.rowCount} rows → ${Object.keys(st.people).length} managers `
+        + `across ${st.cmsFor.size} communities`);
+      if (!st.rowCount) {
+        find.problems.push("the contact sheet produced no usable rows — wrong file, or the columns have been renamed");
+      }
+      if (st.ignored.size) {
+        find.notes.push(`${label}: skipped ${st.ignored.size} known non-map development`
+          + `${st.ignored.size === 1 ? "" : "s"} (${[...st.ignored].join(", ")})`);
+      }
+      return { people: st.people, cmsFor: st.cmsFor, acmFor: st.acmFor,
+               unmatched: [...st.unmatched], ignored: [...st.ignored],
+               acmNames: [...st.acmNames] };
+    };
+
+    return st;
+  }
+
+  /* ORLANDO — the Power BI export.
+
      `grid` is the sheet as an array of arrays, INCLUDING the applied-filter block
      the Power BI export writes above the table — the header row is located, not
      assumed. Throws on a sheet it cannot read; that is an expected failure and
@@ -1557,79 +1763,209 @@
       if (col[need] == null) throw new Error(`contact sheet is missing a "${need}" column`);
     }
 
-    const targets = communityNames.map(n => ({ name: n, n: normName(n) }));
-    const matchToken = tok => {
-      const t = normName(tok);
-      if (!t) return [];
-      let keys = aliases[t] || t;
-      if (!Array.isArray(keys)) keys = [keys];
-      return targets.filter(c => keys.some(k => c.n.startsWith(k))).map(c => c.name);
-    };
-
-    const people = {};                   // id -> person
-    const cmsFor = new Map();            // community -> [ids], in sheet order
-    const acmFor = new Map();            // community -> Set(acm name)
-    const unmatched = new Set();
-    const ignored = new Set();
-    const acmNames = new Set();
-    let rowCount = 0;
+    const acc = contactAccumulator(makeMatcher(communityNames, aliases), ignoredDevs);
 
     for (const r of grid.slice(headerRow + 1)) {
       if (!Array.isArray(r)) continue;
-      const comms = S(r[col.communities]);
-      const name  = S(r[col.name]);
-      const email = S(r[col.email]);
-      if (!comms || !name || !email) continue;
-      rowCount++;
+      acc.add({
+        comms: S(r[col.communities]),
+        name:  S(r[col.name]),
+        phone: col.phone != null ? S(r[col.phone]) : null,
+        email: S(r[col.email]),
+        acm:   col.acm != null ? S(r[col.acm]) : null
+      });
+    }
 
-      const id = personIdFor(email);
-      if (!people[id]) {
-        people[id] = {
-          name,
-          phone: col.phone != null ? S(r[col.phone]) : null,
-          email: email.toLowerCase(),    // the source mixes casing
-          roles: ["cm"]
+    return acc.finish(find, "contacts");
+  }
+
+  /* TAMPA — the hand-maintained workbook.
+
+     Called with the two tabs already read as arrays of arrays:
+
+       { assignments: grid, acms: grid }
+
+     `acms` is optional. Without it the area managers are resolved the Orlando
+     way — matched by name against the people already on file — and Tampa's
+     first publish has no manager cards, because that directory is created BY
+     the publish. With it, the six area managers arrive with their cell numbers
+     and the cards work immediately. That is the only reason the second tab is
+     read at all; the DOC on it is deliberately not imported, since no role on
+     the map renders one.
+
+     Hub, Meeting and the ACM tab's Area column are read past. They are real
+     Tampa concepts with no equivalent anywhere in the published document, and
+     inventing fields nothing renders is how a schema fills up with data nobody
+     maintains.                                                                 */
+  function parseContactsTampa(sheets, communityNames, find, opts) {
+    const options = opts || {};
+    const aliases = options.aliases || TAMPA_COMMUNITY_ALIASES;
+    const ignoredDevs = options.ignoredDevelopments || IGNORED_DEVELOPMENTS;
+
+    const grid = (sheets && sheets.assignments) || null;
+    if (!Array.isArray(grid)) {
+      throw new Error('the Tampa contact sheet has no "Construction Assignments" tab');
+    }
+
+    /* The header is row 1 in this file, but it is located rather than assumed —
+       somebody will add a title row above it eventually, and that should not be
+       the day the import starts assigning managers to a community called
+       "Community Assignment". */
+    const headerRow = grid.findIndex(r =>
+      Array.isArray(r) && r.some(c => /^\s*community assignment\s*$/i.test(String(c || ""))));
+    if (headerRow < 0) {
+      throw new Error('could not find a header row containing "Community Assignment" '
+        + "in the Tampa contact sheet");
+    }
+
+    const col = {};
+    grid[headerRow].forEach((h, i) => {
+      const k = String(h == null ? "" : h).trim().toLowerCase();
+      if (/^community assignment/.test(k)) col.communities = i;
+      else if (/^cm$|^construction|^name/.test(k)) col.name = i;
+      else if (/^cell|^phone/.test(k)) col.phone = i;
+      else if (/^acm/.test(k)) col.acm = i;
+    });
+    for (const need of ["communities", "name"]) {
+      if (col[need] == null) {
+        throw new Error(`the Tampa contact sheet is missing a "${need}" column`);
+      }
+    }
+
+    /* Sheet 2, read first: the CM tab and the ACM tab do not spell the area
+       managers identically ("Joe Mitchell" against "Joseph Mitchell"), and the
+       CM tab's spelling is the one that reaches acmFor. Canonicalising to the
+       ACM tab here means buildDocument's plain name lookup keeps working
+       instead of needing a fuzzy one. */
+    const acmPeople = {};
+    const acmCanonical = new Map();      // normalized CM-tab spelling -> canonical name
+    const acmByLast = new Map();         // last name -> [{ canonical, first }]
+    if (Array.isArray(sheets.acms)) {
+      let inAcmBlock = false;
+      for (const r of sheets.acms) {
+        if (!Array.isArray(r)) continue;
+        const first = String(r[0] == null ? "" : r[0]).trim();
+        /* The tab is two labelled blocks with blank rows between them — a DOC
+           block, then an ACM block. Only the second is imported, so the rows are
+           taken from the "ACM" label onward and the DOC's are skipped. */
+        if (/^acm$/i.test(first)) { inAcmBlock = true; continue; }
+        if (/^doc$/i.test(first)) { inAcmBlock = false; continue; }
+        if (!inAcmBlock || !first) continue;
+
+        const email = emailFromName(first);
+        if (!email) continue;
+        const id = personIdFor(email);
+        acmPeople[id] = {
+          name: first,
+          phone: normPhone(r[1]),
+          email: email.toLowerCase(),
+          roles: ["acm"]
         };
-      }
-
-      const acm = col.acm != null ? S(r[col.acm]) : null;
-      if (acm) acmNames.add(acm);
-
-      let hitAny = false;
-      for (const tok of String(comms).split(COMMUNITY_SPLIT)) {
-        const t = tok.trim();
-        if (!t) continue;
-        const hits = matchToken(t);
-        if (!hits.length) {
-          if (normName(t) in ignoredDevs) ignored.add(t);
-          else unmatched.add(t);
-          continue;
-        }
-        hitAny = true;
-        for (const c of hits) {
-          if (!cmsFor.has(c)) cmsFor.set(c, []);
-          if (!cmsFor.get(c).includes(id)) cmsFor.get(c).push(id);
-          if (acm) {
-            if (!acmFor.has(c)) acmFor.set(c, new Set());
-            acmFor.get(c).add(acm);
-          }
+        acmCanonical.set(normName(first), first);
+        const parts = first.split(/\s+/).filter(Boolean);
+        if (parts.length > 1) {
+          const last = normName(parts[parts.length - 1]);
+          if (!acmByLast.has(last)) acmByLast.set(last, []);
+          acmByLast.get(last).push({ canonical: first, first: normName(parts[0]) });
         }
       }
-      if (!hitAny) delete people[id];     // nobody references them; do not publish them
     }
 
-    find.notes.push(`contacts: ${rowCount} rows → ${Object.keys(people).length} managers `
-      + `across ${cmsFor.size} communities`);
-    if (!rowCount) {
-      find.problems.push("the contact sheet produced no usable rows — wrong file, or the columns have been renamed");
-    }
-    if (ignored.size) {
-      find.notes.push(`contacts: skipped ${ignored.size} known non-map development`
-        + `${ignored.size === 1 ? "" : "s"} (${[...ignored].join(", ")})`);
+    /* Exact match first, then the nickname table: same surname, and two given
+       names that are the same name written two ways.
+
+       The obvious rule — one given name is a prefix of the other — does not work
+       and is worth writing down so nobody reaches for it again. English short
+       forms are mostly not prefixes of the name they shorten: Joe is not a
+       prefix of Joseph, nor Bob of Robert, Bill of William, Mike of Michael or
+       Dave of David. It resolves almost nothing while looking like it should.
+
+       The looser rule — same surname, same initial — does work, and is rejected
+       anyway: it cannot tell David Rowe from Daniel Rowe, and the cost of
+       getting it wrong is every community under one area manager attributed to
+       another. A table only resolves names somebody has thought about, which on
+       a list of six area managers is the right trade. Anything it cannot resolve
+       is left exactly as the sheet wrote it, and buildDocument reports it as an
+       area manager with no details — visible, and fixed by one entry here or by
+       spelling the name the same way on both tabs. */
+    const reconciled = [];
+    function canonicalAcm(name) {
+      if (!name) return name;
+      const n = normName(name);
+      if (acmCanonical.has(n)) return acmCanonical.get(n);
+      const parts = name.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return name;
+      const cands = acmByLast.get(normName(parts[parts.length - 1])) || [];
+      const given = givenNameKey(normName(parts[0]));
+      const hit = cands.filter(c => givenNameKey(c.first) === given);
+      if (hit.length === 1) {
+        reconciled.push(`"${name}" → "${hit[0].canonical}"`);
+        acmCanonical.set(n, hit[0].canonical);
+        return hit[0].canonical;
+      }
+      return name;
     }
 
-    return { people, cmsFor, acmFor, unmatched: [...unmatched],
-             ignored: [...ignored], acmNames: [...acmNames] };
+    const acc = contactAccumulator(makeMatcher(communityNames, aliases), ignoredDevs);
+    const guessedNames = [];
+    const multiPart = [];
+
+    for (const r of grid.slice(headerRow + 1)) {
+      if (!Array.isArray(r)) continue;
+      const name = S(r[col.name]);
+      if (!name) continue;
+      const email = emailFromName(name);
+      if (email) {
+        guessedNames.push(name);
+        if (name.split(/\s+/).filter(Boolean).length > 2) multiPart.push(name);
+      }
+      acc.add({
+        /* "Ivywood(Campbell Road)" is one community with a note attached, not a
+           community called that. The parenthetical is dropped before the split,
+           so it cannot be mistaken for a second development. */
+        comms: String(S(r[col.communities]) || "").replace(/\(.*?\)/g, " ").replace(/\s+/g, " ").trim() || null,
+        name,
+        phone: col.phone != null ? normPhone(r[col.phone]) : null,
+        email,
+        acm:   col.acm != null ? canonicalAcm(S(r[col.acm])) : null
+      });
+    }
+
+    const out = acc.finish(find, "Tampa contacts");
+    out.acmPeople = acmPeople;
+    /* Every address in this sheet is derived, so every id in it is. buildDocument
+       uses this to let a verified address on file survive an import. */
+    out.derivedEmails = new Set(Object.keys(out.people));
+
+    /* Say out loud that these addresses were derived. The count is the honest
+       headline; the multi-part names are listed because they are the ones most
+       likely to be wrong. */
+    if (guessedNames.length) {
+      find.notes.push(`Tampa contacts: ${guessedNames.length} email address`
+        + `${guessedNames.length === 1 ? " was" : "es were"} derived from the name `
+        + `as first.last@${EMAIL_DOMAIN} — the sheet has no Email column`);
+    }
+    if (multiPart.length) {
+      (find.warnings || find.notes).push(`Tampa contacts: ${multiPart.length} name`
+        + `${multiPart.length === 1 ? " has" : "s have"} more than two parts, so the derived `
+        + `address drops the middle name and may be wrong (${multiPart.join(", ")}) — `
+        + "check these against the directory");
+    }
+    if (reconciled.length) {
+      find.notes.push(`Tampa contacts: matched ${reconciled.length} area-manager name`
+        + `${reconciled.length === 1 ? "" : "s"} across the two tabs (${reconciled.join(", ")})`);
+    }
+    if (Object.keys(acmPeople).length) {
+      find.notes.push(`Tampa contacts: ${Object.keys(acmPeople).length} area managers read `
+        + 'from the "ACM Assignments" tab');
+    } else {
+      (find.warnings || find.notes).push('the Tampa contact sheet has no readable '
+        + '"ACM Assignments" tab, so area managers are matched by name against the people '
+        + "already on file — on a first publish there are none, and those communities "
+        + "publish without a manager card");
+    }
+
+    return out;
   }
 
   /* =============================== THE MERGE ===============================
@@ -1672,6 +2008,29 @@
     // The area managers are named in the sheet but their phone and email are not,
     // so carry those across from the people already on file.
     if (contacts) {
+      /* Unless the sheet brought them. Tampa's workbook has a second tab listing
+         its area managers with cell numbers, and parseContactsTampa returns them
+         here; folding them in BEFORE the name index is built is what makes the
+         manager cards work on a first publish rather than one import later.
+
+         Existing detail wins on a field-by-field basis, and the email
+         specifically: what is already on file is a real address somebody
+         verified, while the one that arrives here was derived from a name. An
+         area manager who is assigned to no community is still dropped further
+         down, along with every other contact nobody references. */
+      if (contacts.acmPeople && Object.keys(contacts.acmPeople).length) {
+        people.people = people.people || {};
+        for (const [id, p] of Object.entries(contacts.acmPeople)) {
+          const prev = people.people[id] || {};
+          people.people[id] = {
+            name: prev.name || p.name || null,
+            phone: prev.phone || p.phone || null,
+            email: prev.email || p.email || null,
+            roles: [...new Set([...(prev.roles || []), "acm"])]
+          };
+        }
+      }
+
       const acmByName = new Map();
       for (const [id, p] of Object.entries(people.people || {})) {
         if (p.name) acmByName.set(p.name, id);
@@ -1831,12 +2190,22 @@
     let droppedPeople = [];
     if (contacts) {
       const merged = Object.assign({}, people.people || {});
+      /* Ids whose email the parser derived from a name rather than read from a
+         column. For those the address already on file wins, which is the
+         opposite of the usual rule and deliberately so: everywhere else the
+         sheet is the source of truth, but a Tampa sheet has no Email column at
+         all, so "the sheet wins" would mean a guess overwriting an address a
+         person actually verified — every week, silently. */
+      const derived = contacts.derivedEmails || null;
+      const isDerived = id => !!(derived && derived.has(id));
       for (const [id, p] of Object.entries(contacts.people)) {
         const prev = merged[id] || {};
         merged[id] = {
           name: p.name || prev.name || null,
           phone: p.phone || prev.phone || null,
-          email: p.email || prev.email || null,
+          email: isDerived(id)
+            ? (prev.email || p.email || null)
+            : (p.email || prev.email || null),
           roles: [...new Set([...(prev.roles || []), "cm"])]
         };
       }
@@ -1929,7 +2298,9 @@
 
   return {
     S, digits, normCommunityId, xlDate, cleanCommName, normName, personIdFor,
-    COMMUNITY_ALIASES, COMMUNITY_SPLIT, IGNORED_DEVELOPMENTS, AWAITING_CONTACTS,
+    emailFromName, normPhone, EMAIL_DOMAIN, GIVEN_NAME_SHORT_FORMS,
+    COMMUNITY_ALIASES, TAMPA_COMMUNITY_ALIASES, COMMUNITY_SPLIT,
+    IGNORED_DEVELOPMENTS, AWAITING_CONTACTS,
     PLACEHOLDER_PER_DAY, GROWTH_REFUSE,
     STREET_TYPES, DIRECTIONS, BBOX, AGREE_M, SIBLING_M, REJECT_M,
     streetOf, streetKey, sameStreet, nameMatch, metresBetween, inBox, developmentOf,
@@ -1937,7 +2308,7 @@
     resolveLocation, pendingLocations, applyLocation,
     acceptProposal, rejectProposal, placeManually, parseLatLon, wasRejected,
     parseLocality, placeKey, localityAgrees, localitiesFrom,
-    parseStarts, aggregateStarts, parseRE2, parseContacts,
+    parseStarts, aggregateStarts, parseRE2, parseContacts, parseContactsTampa,
     currentDataStart, buildDocument, diffDocument
   };
 });

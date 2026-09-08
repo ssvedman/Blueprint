@@ -191,12 +191,31 @@ self.onmessage = function (e) {
         }
 
       } else if (kind === "contacts") {
-        // Parsed by the map path, which needs the raw rows rather than a shape of
-        // its own; the header row is hunted there because it is below the filter
-        // block.
+        /* Parsed by the map path, which needs the raw rows rather than a shape of
+           its own; the header row is hunted there because it is below the filter
+           block in Orlando's export and could move in Tampa's.
+
+           Orlando's export is one sheet and arrives as `rows`. Tampa's is two
+           tabs and arrives as `sheets`, which is the shape parseContactsTampa
+           takes. Both are set on the same record and the page picks by division,
+           so a file that is somehow both does not silently lose a tab. */
         const X = self.XLSX;
-        out.rows = X.utils.sheet_to_json(
-          self.BPI.fixRange(wb.Sheets[wb.SheetNames[0]]), { header: 1, defval: null });
+        const grid = name => X.utils.sheet_to_json(
+          self.BPI.fixRange(wb.Sheets[name]), { header: 1, defval: null });
+
+        const assignments = self.BPI.findSheet(allSheetNames, self.BPI.TPU_CONTACTS_SHEET);
+        if (assignments) {
+          const acms = self.BPI.findSheet(allSheetNames, self.BPI.TPU_ACM_SHEET);
+          out.sheets = {
+            assignments: grid(assignments),
+            /* Absent is survivable — parseContactsTampa falls back to matching
+               area managers against the people already on file — so a missing
+               tab is reported there rather than failing the parse here. */
+            acms: acms ? grid(acms) : null
+          };
+        } else {
+          out.rows = grid(wb.SheetNames[0]);
+        }
       } else if (kind === "flow") {
         out.flowRowsRaw = self.XLSX.utils.sheet_to_json(
           wb.Sheets[self.BPI.findSheet(allSheetNames, self.BPI.FLOW_SHEET)], { defval: null });

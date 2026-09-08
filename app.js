@@ -1417,13 +1417,22 @@
     // …Rec suffixes are the dropped FILES; the unsuffixed names inside each
     // destination block are that file's parsed result. Confusing the two is how
     // you end up publishing a file object.
-    const contactsRec = parsed.find(r => r.kind === "contacts");
     const startsBy = {};
     for (const r of parsed) if (r.kind === "starts" && r.division) startsBy[r.division] = r;
 
+    /* Contacts are per division, like the starts logs, because there are two
+       sheets and they are different files: Orlando's Power BI export and Tampa's
+       hand-maintained workbook. Both can be dropped in the same batch, and each
+       must reach only its own division's map — a Tampa sheet applied to Orlando
+       matches nothing and, under --contacts-strict semantics, would clear every
+       manager in the division. The division came off the layout during sniffing,
+       so there is nothing for the operator to set. */
+    const contactsBy = {};
+    for (const r of parsed) if (r.kind === "contacts" && r.division) contactsBy[r.division] = r;
+
     const present = {
       re2: !!re2,
-      contacts: !!contactsRec,
+      contacts: Object.fromEntries(Object.keys(contactsBy).map(k => [k, true])),
       flow: parsed.some(r => r.kind === "flow"),
       starts: Object.fromEntries(Object.keys(startsBy).map(k => [k, true]))
     };
@@ -1493,7 +1502,11 @@
         const divRe2 = (re2.parsed.mapRe2ByDiv && re2.parsed.mapRe2ByDiv[t.division])
                     || (t.division === "orlando" ? re2.parsed.mapRe2 : null);
 
-        const find = { notes: [], problems: [] };
+        /* The warnings array is created here rather than only at buildDocument,
+           because the contact parse below runs FIRST and has advisory findings of
+           its own — a derived email address that may be wrong, a missing ACM tab.
+           Without a channel those land on `notes`, where nothing surfaces them. */
+        const find = { notes: [], problems: [], warnings: [] };
         const dataStart = MAPCORE.currentDataStart();
         const startsAgg = startsRec.parsed.mapStarts
           ? MAPCORE.aggregateStarts(startsRec.parsed.mapStarts.records, dataStart, find)
@@ -1513,12 +1526,25 @@
            after this run, so this has to happen here rather than in the worker —
            it needs the published document. The sheet is ~50 rows, so the cost is
            nothing. */
+        const contactsRec = contactsBy[t.division] || null;
         let contacts = null;
         if (contactsRec) {
           const names = new Set((baseDoc.communities || []).map(c => c.name));
           if (startsAgg) for (const id of startsAgg.keys()) names.add(idName[id] || id);
           try {
-            contacts = MAPCORE.parseContacts(contactsRec.parsed.rows, [...names], find);
+            /* Which parser is decided by what the worker managed to read, not by
+               the division name: a Tampa record carries `sheets`, an Orlando one
+               carries `rows`. Keying off the shape means a file whose layout was
+               sniffed one way but read the other fails loudly here instead of
+               parsing to zero rows and reporting a clean, empty success. */
+            const p = contactsRec.parsed || {};
+            if (p.sheets) {
+              contacts = MAPCORE.parseContactsTampa(p.sheets, [...names], find);
+            } else if (p.rows) {
+              contacts = MAPCORE.parseContacts(p.rows, [...names], find);
+            } else {
+              throw new Error("no sheet could be read from it");
+            }
           } catch (err) {
             // A malformed sheet is an expected failure, not a crash: the other
             // destinations must still be publishable.
@@ -1536,7 +1562,7 @@
           /* Supplying the channel is what routes advisory findings (an area
              manager the directory has no details for) away from blocking —
              see the comment at buildDocument. */
-          warnings: []
+          warnings: find.warnings
         });
 
         /* Kept so a coordinate entered below can be re-diffed against the same
@@ -1571,8 +1597,10 @@
           notes: t.mapResult.notes
         };
         if (!contactsRec) {
-          t.guard.warnings.push("No contacts export, so construction managers are "
-            + "left exactly as they are. Everything else still updates.");
+          t.guard.warnings.push("No " + t.divisionLabel + " contact sheet, so construction "
+            + "managers are left exactly as they are. Everything else still updates. "
+            + "The two divisions' sheets are separate files — dropping one does not "
+            + "refresh the other.");
         }
         /* Deliberately NOT pushed onto guard.warnings. Placing a community from
            this card changes the count, and a warning computed once at plan time
@@ -1613,7 +1641,7 @@
         '<div class="panel-b">' +
           '<p class="hint" style="margin:0 0 10px">' +
             "Drop the workbooks as they arrive — the Starts Log from each division's permitting " +
-            "manager, the RE2 export from E1, the contacts export from Power BI. Each file is " +
+            "manager, the RE2 export from E1, each division's construction contact sheet. Each file is " +
             "recognised on its own, and each destination publishes only once everything it needs " +
             "is here. Nothing is written until you press a Publish button." +
           "</p>" +
@@ -1730,7 +1758,7 @@
         // Naming what it looked for beats "unrecognised file", which leaves the
         // reader with nothing to check.
         statusCell = '<span class="pill warn">Not recognised</span> <span class="hint">' +
-          esc(f.why || "") + ". Expected a Starts Log, the RE2 export, the contacts export, " +
+          esc(f.why || "") + ". Expected a Starts Log, the RE2 export, a contact sheet, " +
           "or the Flow of Takeoffs workbook.</span>";
       } else if (f.status === "needs-division") {
         statusCell = '<span class="pill warn">Which division?</span>';
@@ -1774,6 +1802,14 @@
       return 'sheet "' + p.vp.sheet + '" · ' + p.vp.sourceRows.toLocaleString() + " rows · " +
         p.vp.startRecords.length.toLocaleString() + " start records · " +
         p.tf.rows.length.toLocaleString() + " plan/elevation combinations";
+    }
+    if (f.kind === "contacts" && p.sheets) {
+      // Tampa: two tabs, and the second one is the part an operator will want to
+      // see landed, since without it there are no manager cards.
+      const a = (p.sheets.assignments || []).length;
+      const m = (p.sheets.acms || []).length;
+      return a + " rows" + (m ? " · " + m + " rows of area managers"
+                              : ' · no "ACM Assignments" tab');
     }
     if (f.kind === "contacts" && p.rows) return p.rows.length + " rows";
     if (f.kind === "flow" && p.flowRowsRaw) return p.flowRowsRaw.length + " rows";
