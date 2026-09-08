@@ -772,6 +772,85 @@
     return out;
   }
 
+  /* ─── Municipality and utility providers ──────────────────────────────────
+
+     Three fields the map renders that NO workbook carries: the permitting
+     municipality, and the electric and water providers. Until now they existed
+     only in the published document, typed in by hand — Orlando has them on 67
+     of its 74 communities because somebody sat and filled them in, and
+     validate.js warns per community when they are missing.
+
+     That does not scale to a second division, and it does not have to: the
+     Community-DB CIS already holds all three per community, keyed by JDE
+     number, which is the same key the map uses. So they are read from there.
+
+     The CIS wins on every import. What that means precisely, because the
+     precise version is the whole design:
+
+       · A CIS value REPLACES whatever the map holds, including a hand-entered
+         one. The CIS is the record the division maintains; the map's copy is a
+         transcription of it, and a transcription that disagrees with its source
+         is stale, not authoritative.
+
+       · An ABSENT CIS value changes nothing. "The CIS wins" is not "the CIS is
+         complete" — a community nobody has filled in yet would otherwise have
+         its three fields blanked on the next import, which would silently
+         delete the work Orlando has already done. Only a value can overwrite a
+         value.
+
+       · Placeholders are absent. A hand-filled field holding "N/A" or "TBD"
+         must not be written into the map, where it renders as though somebody
+         had established that the provider is called N/A. The map's own em-dash
+         for an empty field is the more honest answer.                          */
+
+  // map field ← CIS field. The CIS names these from the trade's point of view
+  // ("Power Provider", "Water Meter Provider"); the map labels them Electric and
+  // Water. Same fact, different vocabulary, so the mapping is written down.
+  const CIS_UTILITY_FIELDS = [
+    ["municipality", "municipality"],
+    ["electric",     "power_provider"],
+    ["water",        "water_meter"]
+  ];
+
+  const UTILITY_PLACEHOLDER = /^(?:n\/?a|none|tbd|tbc|pending|unknown|\?+|-+|\.+|0)$/i;
+
+  function cleanUtility(v) {
+    const s = S(v);
+    if (!s) return null;
+    return UTILITY_PLACEHOLDER.test(s.replace(/\s+/g, "")) ? null : s;
+  }
+
+  /* Same rows and the same published-beats-draft ranking as localitiesFrom, and
+     deliberately a second pass rather than an extra return value on that one:
+     localities feed the geocoder and these feed the document, they are consumed
+     at different points in the import, and one function returning both invites a
+     caller to hand geocoding data to the merge or vice versa. */
+  function utilitiesFrom(rows) {
+    const out = {};
+    const rank = { published: 2, draft: 1 };
+    const seen = {};
+    for (const r of rows || []) {
+      const id = normCommunityId(r && r.jde);
+      if (!id) continue;
+      const score = rank[r.status] || 0;
+      if (seen[id] != null && seen[id] >= score) continue;
+      const f = (r.data && r.data.f) || {};
+      const rec = {};
+      let any = false;
+      for (const [field, key] of CIS_UTILITY_FIELDS) {
+        const v = cleanUtility(f[key]);
+        if (v) { rec[field] = v; any = true; }
+      }
+      // A row carrying none of the three is not evidence about them, so it must
+      // not claim the slot and lock out a draft that does carry them.
+      if (!any) continue;
+      rec.source = "Community-DB CIS" + (r.status === "draft" ? " (draft)" : "");
+      out[id] = rec;
+      seen[id] = score;
+    }
+    return out;
+  }
+
   /* Decide where a community is, from geocoded candidates for its streets.
 
      candidates: [{ street, hit }] where hit is
@@ -1974,7 +2053,8 @@
        data, people            the currently published documents
        startsAgg, idName       from parseStarts + aggregateStarts, or null
        re2                     from parseRE2, or null
-       contacts                from parseContacts, or null
+       contacts                from parseContacts or parseContactsTampa, or null
+       utilities               from utilitiesFrom, or null
        dataStart               "YYYY-MM"; defaults to the current month
        contactsStrict          clear contacts for communities the sheet omits
      }
@@ -1999,6 +2079,7 @@
     const idName = input.idName || {};
     const re2 = input.re2 || null;
     const contacts = input.contacts || null;
+    const utilities = input.utilities || null;
     const strict = !!input.contactsStrict;
     const awaiting = input.awaitingContacts || AWAITING_CONTACTS;
     const allowGrowth = !!input.allowGrowth;
@@ -2096,6 +2177,10 @@
 
     const out = [];
     const added = [], dormant = [], needGeo = [];
+    // What the CIS filled in and what it corrected, kept apart: the first is
+    // routine progress and the second is somebody's entry being contradicted,
+    // which is the one worth reading.
+    const utilFilled = [], utilChanged = [];
 
     for (const id of ids) {
       const prev = existing.get(id);
@@ -2136,6 +2221,26 @@
           }
         } else if (strict) {
           delete rec.cms;
+        }
+      }
+
+      /* The CIS overwrites a value and never clears one — see the note at
+         utilitiesFrom. Writing only on a real difference is what keeps the
+         report meaningful: without it every community would be listed as
+         "changed" on every run and the list would say nothing. */
+      if (utilities) {
+        const u = utilities[id];
+        if (u) {
+          for (const [field] of CIS_UTILITY_FIELDS) {
+            const next = u[field];
+            if (!next || next === rec[field]) continue;
+            if (rec[field]) {
+              utilChanged.push(`${rec.name}: ${field} "${rec[field]}" → "${next}"`);
+            } else {
+              utilFilled.push(rec.name);
+            }
+            rec[field] = next;
+          }
         }
       }
 
@@ -2220,6 +2325,29 @@
       }
     }
 
+    if (utilities) {
+      const covered = out.filter(c => utilities[c.num]).length;
+      const blank = out.filter(c => !c.municipality || !c.electric || !c.water);
+      find.notes.push(`CIS: municipality and utilities for ${covered} of ${out.length} `
+        + `communities` + (utilFilled.length
+            ? `, filling ${[...new Set(utilFilled)].length} that had none` : ""));
+      if (utilChanged.length) {
+        find.notes.push(`CIS: corrected ${utilChanged.length} value`
+          + `${utilChanged.length === 1 ? "" : "s"} that disagreed with the map `
+          + `(${utilChanged.slice(0, 5).join("; ")}${utilChanged.length > 5 ? "; …" : ""})`);
+      }
+      /* Named rather than counted, because this is the actionable half: the fix
+         is to fill the field in Community-DB, and nobody can do that without
+         knowing which community. */
+      if (blank.length) {
+        (find.warnings || find.notes).push(`${blank.length} communit`
+          + `${blank.length === 1 ? "y is" : "ies are"} still missing a municipality or a `
+          + `utility provider, and the CIS has nothing to fill it from `
+          + `(${blank.slice(0, 8).map(c => c.name).join(", ")}`
+          + `${blank.length > 8 ? ", …" : ""}) — fill it in Community-DB`);
+      }
+    }
+
     const next = {
       generatedAt: new Date(input.now || Date.now()).toISOString(),
       updateCadenceDays: data.updateCadenceDays || 7,
@@ -2264,6 +2392,11 @@
       warnings: find.warnings || [],
       added, dormant, needGeo, droppedPeople,
       coverage,
+      utilities: utilities
+        ? { filled: [...new Set(utilFilled)], changed: utilChanged,
+            missing: out.filter(c => !c.municipality || !c.electric || !c.water)
+                        .map(c => c.name) }
+        : null,
       totals: {
         communities: out.length,
         starts: out.reduce((a, c) => a + c.starts.reduce((x, y) => x + y, 0), 0),
@@ -2308,6 +2441,7 @@
     resolveLocation, pendingLocations, applyLocation,
     acceptProposal, rejectProposal, placeManually, parseLatLon, wasRejected,
     parseLocality, placeKey, localityAgrees, localitiesFrom,
+    utilitiesFrom, cleanUtility, CIS_UTILITY_FIELDS,
     parseStarts, aggregateStarts, parseRE2, parseContacts, parseContactsTampa,
     currentDataStart, buildDocument, diffDocument
   };

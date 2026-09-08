@@ -558,14 +558,23 @@ window.BPDB = (function () {
 
      Never fatal. A failure here means fewer communities can be placed, which is
      the state the map was in before this existed; it must not stop an import. */
+  /* One query, two derivations. `by` is the localities the geocoder narrows on;
+     `utilities` is the municipality and utility providers the map publishes.
+     They come off the same rows and the same division filter, so fetching them
+     together is one round trip instead of two — which matters because the map
+     import now needs the utilities on EVERY run, where it used to fetch this
+     only when a community was waiting to be placed. */
   async function mapLocalities(division) {
     const { data, error } = await client.from("cdb_cis")
       .select("jde,status,data")
       .eq("division", division || "orlando")
       .not("jde", "is", null);
-    if (error) return { ok: false, error: friendly(error), by: {}, sheets: 0 };
+    if (error) {
+      return { ok: false, error: friendly(error), by: {}, utilities: {}, sheets: 0 };
+    }
     const rows = data || [];
-    return { ok: true, by: MAPCORE.localitiesFrom(rows), sheets: rows.length };
+    return { ok: true, by: MAPCORE.localitiesFrom(rows),
+             utilities: MAPCORE.utilitiesFrom(rows), sheets: rows.length };
   }
 
   async function mapCurrent(key) {

@@ -1552,12 +1552,34 @@
           }
         }
 
+        /* Community-DB, before the merge rather than after it.
+
+           This used to be fetched only when a community was waiting to be
+           placed, on the reasoning that it is a whole extra query and on a
+           normal week nothing is waiting. That no longer holds: the municipality
+           and the two utility providers come from the CIS on every run, so the
+           rows are needed every time. It is still one query — the localities the
+           geocoder uses and the utilities the document publishes are two
+           derivations of the same rows.
+
+           Never fatal. A failure here costs three fields and some placement
+           context, not the import, and blanking what is already published
+           because a query failed would be far worse than leaving it. */
+        const cis = await DB.mapLocalities(t.division);
+        t.localityError = cis.ok ? null : cis.error;
+        if (!cis.ok) {
+          find.notes.push("Community-DB could not be reached, so the municipality and "
+            + "utility providers are left exactly as they are: " + cis.error);
+        }
+
         t.mapResult = MAPCORE.buildDocument({
           data: baseDoc,
           people: basePeople,
           startsAgg, idName,
           re2: divRe2 || null,
-          contacts, dataStart,
+          contacts,
+          utilities: cis.ok ? cis.utilities : null,
+          dataStart,
           notes: find.notes, problems: find.problems,
           /* Supplying the channel is what routes advisory findings (an area
              manager the directory has no details for) away from blocking —
@@ -1581,15 +1603,9 @@
         t.streets = (startsRec.parsed.mapStarts || {}).streets || {};
         t.pending = MAPCORE.pendingLocations(t.mapResult.next, t.streets);
 
-        /* Community-DB knows where these are supposed to be. Fetched only when
-           something is actually waiting — it is a whole extra query, and on a
-           normal week nothing is. Never fatal: a failure here costs context on a
-           screen, not the import. */
-        if (t.pending.length) {
-          const loc = await DB.mapLocalities(t.division);
-          t.localityError = loc.ok ? null : loc.error;
-          attachLocalities(t.pending, loc.by);
-        }
+        // Community-DB knows where these are supposed to be, and its rows are
+        // already in hand from the fetch above.
+        if (t.pending.length && cis.ok) attachLocalities(t.pending, cis.by);
 
         t.guard = {
           blocking: t.mapResult.problems,
