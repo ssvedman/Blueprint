@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blueprint — query console</title>
+
+<!--
+  ============================================================================
+  Blueprint — console.html
+
+  Drop this in the Blueprint repo root. It lands at
+      https://ssvedman.github.io/Blueprint/console.html
+
+  WHY IT NEEDS NO SIGN-IN CODE
+  All four apps are served from ssvedman.github.io, so they share one
+  localStorage. config.js pins AUTH_STORAGE_KEY to "lennar-vendor-portal-auth",
+  and this page passes that same key to createClient. If you are signed in to
+  Blueprint, you are signed in here. There is no login form, no password
+  handling, and no new credential stored anywhere.
+
+  It also reads SUPABASE_URL and SUPABASE_ANON_KEY from the existing config.js
+  rather than restating them, so this file adds no secret to the repo. (The
+  anon key is public by design; RLS is the actual gate.)
+
+  WHY IT IS SAFE TO EXPOSE
+  * Read-only by construction. It calls .select() and .rpc() and nothing else.
+    No insert/update/delete path exists in this file, and the grants in
+    claude-console-grants.sql give `authenticated` SELECT and EXECUTE only.
+  * No arbitrary SQL. The view name is checked against the VIEWS allowlist
+    below. Filter values go through PostgREST's .eq(), which parameterises
+    them. There is no string concatenation into a query anywhere.
+  * Nothing is exposed that you could not already read. Every app.v_* view is
+    SECURITY INVOKER, so RLS on public.division_data still applies per caller.
+  * Not linked from the hub and not registered in hub_apps. Reachable only if
+    you know the URL, and useless without a valid session.
+  ============================================================================
+-->
+
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1c1c1a; --muted:#6b6b66; --line:#e2e1dd;
+    --card:#fff; --accent:#2d5f8a; --ok:#1c7a4a; --bad:#b3261e;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#16171a; --fg:#e8e8e4; --muted:#9a9a94; --line:#2c2e33;
+      --card:#1d1f23; --accent:#7fb2dd; --ok:#5cc98d; --bad:#f2857c;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;padding:24px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{font-size:18px;margin:0 0 2px;font-weight:600}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  #who{font-size:13px;padding:8px 12px;border:1px solid var(--line);
+       border-radius:6px;background:var(--card);margin-bottom:16px}
+  #who.ok{border-color:var(--ok)} #who.bad{border-color:var(--bad)}
+  .card{background:var(--card);border:1px solid var(--line);
+        border-radius:8px;padding:16px;margin-bottom:16px}
+  label{display:block;font-size:12px;color:var(--muted);
+        margin-bottom:4px;font-weight:500}
+  select,input,textarea{width:100%;padding:7px 9px;border:1px solid var(--line);
+        border-radius:5px;background:var(--bg);color:var(--fg);
+        font:13px/1.4 inherit}
+  textarea{font-family:var(--mono);min-height:80px;resize:vertical}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+       gap:12px;margin-bottom:12px}
+  button{padding:8px 16px;border:1px solid var(--accent);border-radius:5px;
+         background:var(--accent);color:#fff;font:500 13px inherit;cursor:pointer}
+  button.ghost{background:transparent;color:var(--accent)}
+  button:disabled{opacity:.5;cursor:default}
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  #status{font-size:12px;color:var(--muted);margin-left:auto}
+  #out{background:var(--card);border:1px solid var(--line);border-radius:8px;
+       padding:14px;font:12px/1.5 var(--mono);white-space:pre;
+       overflow:auto;max-height:60vh;margin:0}
+  details{margin-top:14px} summary{cursor:pointer;color:var(--muted);font-size:12px}
+  code{font-family:var(--mono);font-size:12px;background:var(--bg);
+       padding:1px 4px;border-radius:3px}
+</style>
+
+<div class="wrap">
+  <h1>Query console</h1>
+  <div class="sub">Read-only view over the <code>app</code> schema. Uses your existing Blueprint session.</div>
+
+  <div id="who">Checking session…</div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="op">Operation</label>
+        <select id="op">
+          <option value="describe_schema">describe_schema() — full data dictionary</option>
+          <option value="vendor_share" selected>f_vendor_share() — allocation by vendor</option>
+          <option value="select">browse a view</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- f_vendor_share parameters -->
+    <div id="p_share">
+      <div class="row">
+        <div><label for="f_from">From</label><input id="f_from" type="date"></div>
+        <div><label for="f_to">To</label><input id="f_to" type="date"></div>
+        <div><label for="f_kind">Kind</label>
+          <select id="f_kind">
+            <option value="">both</option><option>Projected</option><option>Actual</option>
+          </select></div>
+        <div><label for="f_div">Division</label>
+          <select id="f_div">
+            <option value="">both</option><option>orlando</option><option>tampa</option>
+          </select></div>
+        <div><label for="f_cat">Category (exact, blank = all)</label>
+          <input id="f_cat" placeholder="Trim Material"></div>
+      </div>
+    </div>
+
+    <!-- view browser parameters -->
+    <div id="p_select" hidden>
+      <div class="row">
+        <div><label for="s_view">View</label><select id="s_view"></select></div>
+        <div><label for="s_limit">Limit</label><input id="s_limit" type="number" value="100" min="1" max="5000"></div>
+      </div>
+      <label for="s_filters">Filters (JSON, column → exact value)</label>
+      <textarea id="s_filters">{"division_key": "orlando"}</textarea>
+    </div>
+
+    <div class="bar">
+      <button id="run">Run</button>
+      <button id="copy" class="ghost">Copy result</button>
+      <span id="status"></span>
+    </div>
+
+    <details>
+      <summary>Programmatic request (JSON) — overrides the form when non-empty</summary>
+      <textarea id="req" placeholder='{"op":"select","view":"v_vendor_assignment","filters":{"division_key":"orlando","category":"Trim Material"},"limit":50}'></textarea>
+    </details>
+  </div>
+
+  <pre id="out">Ready.</pre>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // --- allowlist. A view not named here cannot be queried, full stop. -------
+  var VIEWS = [
+    "v_division", "v_community", "v_trade_category",
+    "v_vendor_assignment", "v_start",
+    "vendor_alias", "meta_table", "meta_column", "meta_metric"
+  ];
+
+  var cfg = window.APP_CONFIG || {};
+  var $ = function (id) { return document.getElementById(id); };
+  var out = $("out"), status = $("status"), who = $("who");
+
+  // Populate the view dropdown from the same allowlist the validator uses,
+  // so the UI can never offer something the check would reject.
+  VIEWS.forEach(function (v) {
+    var o = document.createElement("option"); o.value = o.textContent = v;
+    $("s_view").appendChild(o);
+  });
+
+  // Default window: today through today + 12 months.
+  var today = new Date(), plus = new Date();
+  plus.setFullYear(plus.getFullYear() + 1);
+  var iso = function (d) { return d.toISOString().slice(0, 10); };
+  $("f_from").value = iso(today);
+  $("f_to").value   = iso(plus);
+
+  if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
+    who.className = "bad";
+    who.textContent = "config.js did not load, or has no SUPABASE_URL. "
+      + "This page must sit in the same folder as config.js.";
+    return;
+  }
+
+  // storageKey is the whole trick: it must match the sibling apps character
+  // for character or this page gets its own empty session.
+  var sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+    auth: {
+      storageKey: cfg.AUTH_STORAGE_KEY || "lennar-vendor-portal-auth",
+      persistSession: true,
+      autoRefreshToken: true
+    }
+  });
+
+  function show(v) {
+    out.textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2);
+  }
+
+  sb.auth.getSession().then(function (r) {
+    var s = r && r.data && r.data.session;
+    if (s && s.user) {
+      who.className = "ok";
+      who.textContent = "Signed in as " + s.user.email;
+    } else {
+      who.className = "bad";
+      who.innerHTML = 'Not signed in. Open <a href="./">Blueprint</a>, sign in, '
+        + "then reload this page.";
+    }
+  });
+
+  // --- request builder ------------------------------------------------------
+  function fromForm() {
+    var op = $("op").value;
+    if (op === "describe_schema") return { op: op };
+    if (op === "vendor_share") {
+      return {
+        op: op,
+        from: $("f_from").value || null,
+        to: $("f_to").value || null,
+        kind: $("f_kind").value || null,
+        division: $("f_div").value || null,
+        category: $("f_cat").value.trim() || null
+      };
+    }
+    var filters = {};
+    var raw = $("s_filters").value.trim();
+    if (raw) filters = JSON.parse(raw);
+    return {
+      op: "select",
+      view: $("s_view").value,
+      filters: filters,
+      limit: parseInt($("s_limit").value, 10) || 100
+    };
+  }
+
+  // --- execute. Only three shapes are reachable. ---------------------------
+  function execute(req) {
+    var db = sb.schema("app");
+
+    if (req.op === "describe_schema") {
+      return db.rpc("describe_schema");
+    }
+
+    if (req.op === "vendor_share") {
+      return db.rpc("f_vendor_share", {
+        p_from:     req.from     || null,
+        p_to:       req.to       || null,
+        p_kind:     req.kind     || null,
+        p_division: req.division || null,
+        p_category: req.category || null
+      });
+    }
+
+    if (req.op === "select") {
+      if (VIEWS.indexOf(req.view) === -1) {
+        return Promise.resolve({
+          error: { message: "View not allowed: " + req.view
+                            + ". Allowed: " + VIEWS.join(", ") }
+        });
+      }
+      var q = db.from(req.view).select("*");
+      var f = req.filters || {};
+      // .eq() parameterises both sides; nothing here is interpolated into SQL.
+      Object.keys(f).forEach(function (k) {
+        if (f[k] !== null && f[k] !== "") q = q.eq(k, f[k]);
+      });
+      return q.limit(Math.min(req.limit || 100, 5000));
+    }
+
+    return Promise.resolve({ error: { message: "Unknown op: " + req.op } });
+  }
+
+  function run() {
+    var req;
+    try {
+      var raw = $("req").value.trim();
+      req = raw ? JSON.parse(raw) : fromForm();
+    } catch (e) {
+      show("Bad JSON in request: " + e.message);
+      return;
+    }
+
+    $("run").disabled = true;
+    status.textContent = "running…";
+    out.textContent = "…";
+    var t0 = performance.now();
+
+    execute(req).then(function (res) {
+      var ms = Math.round(performance.now() - t0);
+      $("run").disabled = false;
+      if (res.error) {
+        status.textContent = "error · " + ms + "ms";
+        show("ERROR: " + res.error.message
+             + (res.error.hint ? "\nHINT: " + res.error.hint : ""));
+        return;
+      }
+      var d = res.data;
+      var n = Array.isArray(d) ? d.length : (d == null ? 0 : 1);
+      status.textContent = n + " row" + (n === 1 ? "" : "s") + " · " + ms + "ms";
+      show(d);
+    }).catch(function (e) {
+      $("run").disabled = false;
+      status.textContent = "failed";
+      show("EXCEPTION: " + (e && e.message ? e.message : String(e)));
+    });
+  }
+
+  $("op").addEventListener("change", function () {
+    var op = $("op").value;
+    $("p_share").hidden  = op !== "vendor_share";
+    $("p_select").hidden = op !== "select";
+  });
+  $("run").addEventListener("click", run);
+  $("copy").addEventListener("click", function () {
+    navigator.clipboard.writeText(out.textContent).then(function () {
+      status.textContent = "copied";
+    });
+  });
+})();
+</script>
