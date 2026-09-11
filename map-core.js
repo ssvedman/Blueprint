@@ -2166,8 +2166,15 @@
         + "and were ignored — the export covers the division's whole history");
     }
 
-    const cats = data.tradeCats.slice();
-    const vendors = data.vendors.slice();
+    /* Default rather than assume. Vendor assignments became signed-in only, so a
+       published document legitimately may not carry these: the map's public
+       fallback has none by design, and a row seeded from it therefore has none
+       either. Dereferencing them directly threw a TypeError and took the whole
+       import down before it reported anything. An empty lookup just means the
+       RE2 export supplies every category and vendor from scratch, which is
+       exactly what happens on a first import anyway. */
+    const cats = (data.tradeCats || []).slice();
+    const vendors = (data.vendors || []).slice();
     const catIdx = new Map(cats.map((c, i) => [c, i]));
     const venIdx = new Map(vendors.map((v, i) => [v, i]));
     const intern = (list, idx, v) => {

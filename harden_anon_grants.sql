@@ -37,8 +37,13 @@
 --  signed out.
 --
 --  The one exception is the Community Map, which has no sign-in by design. It
---  reads exactly one object — the map_public view — and section 2 preserves that
---  grant explicitly.
+--  reads exactly one object AS ANON — the map_public view — and section 2
+--  preserves that grant explicitly.
+--
+--  The map also reads map_assignments, but only when somebody is signed in: that
+--  view carries the trade-by-vendor matrix, anon holds no grant on it, and this
+--  file must never give it one. Section 3 already enforces that, since it fails
+--  if anon holds a privilege on anything other than map_public.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
