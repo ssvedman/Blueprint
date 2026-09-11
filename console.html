@@ -98,6 +98,7 @@
           <option value="vendor_share" selected>f_vendor_share() — allocation by vendor</option>
           <option value="coverage_risk">f_coverage_risk() — under-provisioned communities</option>
           <option value="sql">SQL — ad-hoc SELECT (admins only)</option>
+
           <option value="select">browse a view</option>
         </select>
       </div>
@@ -270,6 +271,7 @@
         limit: parseInt($("q_limit").value, 10) || 500
       };
     }
+
     var filters = {};
     var raw = $("s_filters").value.trim();
     if (raw) filters = JSON.parse(raw);
@@ -377,6 +379,7 @@
     $("p_share").hidden  = op !== "vendor_share";
     $("p_risk").hidden   = op !== "coverage_risk";
     $("p_sql").hidden    = op !== "sql";
+
     $("p_select").hidden = op !== "select";
   });
   $("run").addEventListener("click", run);
