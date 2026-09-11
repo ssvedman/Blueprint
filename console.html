@@ -96,6 +96,8 @@
         <select id="op">
           <option value="describe_schema">describe_schema() — full data dictionary</option>
           <option value="vendor_share" selected>f_vendor_share() — allocation by vendor</option>
+          <option value="coverage_risk">f_coverage_risk() — under-provisioned communities</option>
+          <option value="sql">SQL — ad-hoc SELECT (admins only)</option>
           <option value="select">browse a view</option>
         </select>
       </div>
@@ -116,6 +118,32 @@
           </select></div>
         <div><label for="f_cat">Category (exact, blank = all)</label>
           <input id="f_cat" placeholder="Trim Material"></div>
+      </div>
+    </div>
+
+    <!-- f_coverage_risk parameters -->
+    <div id="p_risk" hidden>
+      <div class="row">
+        <div><label for="r_from">From</label><input id="r_from" type="date"></div>
+        <div><label for="r_to">To</label><input id="r_to" type="date"></div>
+        <div><label for="r_div">Division</label>
+          <select id="r_div">
+            <option value="">both</option><option>orlando</option><option>tampa</option>
+          </select></div>
+        <div><label for="r_thr">Flag below this share of the division median</label>
+          <input id="r_thr" type="number" value="0.5" step="0.05" min="0.05" max="1"></div>
+      </div>
+    </div>
+
+    <!-- ad-hoc SQL parameters -->
+    <div id="p_sql" hidden>
+      <label for="q_sql">SELECT statement — runs as you, with your RLS. Writes and
+        DDL are refused by Postgres itself (app.run_select is STABLE).</label>
+      <textarea id="q_sql" style="min-height:120px"
+        placeholder="select division, count(*) from flow_rows group by 1 order by 1"></textarea>
+      <div class="row" style="margin-top:12px">
+        <div><label for="q_limit">Row cap</label>
+          <input id="q_limit" type="number" value="500" min="1" max="5000"></div>
       </div>
     </div>
 
@@ -173,6 +201,12 @@
   $("f_from").value = iso(today);
   $("f_to").value   = iso(plus);
 
+  // Coverage risk defaults to a 6-month horizon: a provisioning gap 12 months
+  // out is normal, one 6 weeks out is not.
+  var half = new Date(); half.setMonth(half.getMonth() + 6);
+  $("r_from").value = iso(today);
+  $("r_to").value   = iso(half);
+
   if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
     who.className = "bad";
     who.textContent = "config.js did not load, or has no SUPABASE_URL. "
@@ -220,6 +254,22 @@
         category: $("f_cat").value.trim() || null
       };
     }
+    if (op === "coverage_risk") {
+      return {
+        op: op,
+        from: $("r_from").value || null,
+        to: $("r_to").value || null,
+        division: $("r_div").value || null,
+        threshold: parseFloat($("r_thr").value) || 0.5
+      };
+    }
+    if (op === "sql") {
+      return {
+        op: "sql",
+        q: $("q_sql").value,
+        limit: parseInt($("q_limit").value, 10) || 500
+      };
+    }
     var filters = {};
     var raw = $("s_filters").value.trim();
     if (raw) filters = JSON.parse(raw);
@@ -247,6 +297,25 @@
         p_division: req.division || null,
         p_category: req.category || null
       });
+    }
+
+    if (req.op === "coverage_risk") {
+      return db.rpc("f_coverage_risk", {
+        p_division:  req.division || null,
+        p_from:      req.from     || null,
+        p_to:        req.to       || null,
+        p_threshold: req.threshold || 0.5
+      });
+    }
+
+    if (req.op === "sql") {
+      // Everything protective about this lives in the database: run_select is
+      // STABLE (so writes/DDL cannot plan), SECURITY INVOKER (so RLS applies
+      // as normal), and checks hub_is_any_admin() before it does anything.
+      // Deliberately no client-side SQL filtering — a denylist here would be
+      // security theatre, and the earlier version of this console was cut for
+      // exactly that reason.
+      return db.rpc("run_select", { q: req.q, p_limit: req.limit });
     }
 
     if (req.op === "select") {
@@ -306,6 +375,8 @@
   $("op").addEventListener("change", function () {
     var op = $("op").value;
     $("p_share").hidden  = op !== "vendor_share";
+    $("p_risk").hidden   = op !== "coverage_risk";
+    $("p_sql").hidden    = op !== "sql";
     $("p_select").hidden = op !== "select";
   });
   $("run").addEventListener("click", run);

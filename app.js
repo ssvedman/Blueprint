@@ -189,6 +189,18 @@
     $("logoutBtn").onclick = async () => { await DB.signOut(); location.reload(); };
     $("homeLogo").onclick = () => go("apps");
 
+    // Query console is an admin tool. Removed rather than hidden, matching
+    // feedbackLink below — this is presentation only, and deliberately so:
+    // the read surface is gated by RLS and app.run_select() checks
+    // hub_is_any_admin() server-side, so removing the button hides a door
+    // that is already locked.
+    const cs = $("consoleBtn");
+    if (state.isAdmin) {
+      cs.onclick = () => window.open("console.html", "_blank", "noopener");
+    } else {
+      cs.remove();
+    }
+
     const fb = $("feedbackLink");
     if (CFG.FEEDBACK_EMAIL) {
       fb.href = "mailto:" + CFG.FEEDBACK_EMAIL + "?subject=Blueprint%20feedback";
