@@ -364,6 +364,42 @@ window.BPDB = (function () {
     }
   }
 
+  /* Read EVERY row a query matches, not the first page of them.
+
+     PostgREST caps a single response at 1000 rows and reports no error when it
+     truncates — you just get 1000 rows back and no way to tell that from a table
+     that happens to hold exactly 1000. Anything that then treats the result as
+     "everything that exists" is wrong past that point, silently.
+
+     That is not hypothetical. flowExisting() below is the set an import diffs
+     against to decide which community/plan/elevation combinations are new. Read
+     unpaginated, it saw only 1000 of Tampa's 1150 rows, declared the other 150+
+     new, and inserted them again on every Starts Log import — and because the
+     query had no ORDER BY, a different slice fell off each run, so combinations
+     accumulated 2-6 copies rather than a clean doubling. Orlando (636 rows) never
+     crossed the cap, which is why this only ever showed up in Tampa.
+
+     Takeoff Flow's own importer has always paged (sbAll in takeoff-flow/app.js);
+     this is the same thing, so Blueprint's Data Intake and a direct upload to
+     Takeoff Flow now diff against the same set. Pass a FACTORY, not a query: a
+     PostgREST builder cannot be re-ranged once sent. The stable .order() is
+     required, not cosmetic — without a deterministic sort, pages can overlap or
+     skip rows entirely. */
+  const PAGE = 1000;
+
+  async function selectAll(makeQuery, orderBy) {
+    let from = 0, out = [];
+    for (;;) {
+      let q = makeQuery();
+      if (orderBy) q = q.order(orderBy, { ascending: true });
+      const { data, error } = await q.range(from, from + PAGE - 1);
+      if (error) return { ok: false, error: friendly(error), rows: [] };
+      out = out.concat(data || []);
+      if (!data || data.length < PAGE) return { ok: true, rows: out };
+      from += PAGE;
+    }
+  }
+
   /* Which destinations may this person publish to? Read from each app's own role
      table rather than assumed from Blueprint admin: being able to see the tab is
      not the same as being allowed to replace a division.
@@ -446,12 +482,17 @@ window.BPDB = (function () {
 
   /* ---- Takeoff Flow ---- */
 
+  /* Paged on purpose — see selectAll. This is the set planFlowImport() diffs
+     against, so a truncated read here is an import that re-inserts rows it can't
+     see. It must stay paged, and it must stay the same column list Takeoff Flow
+     reads, or the two importers make different decisions from the same file. */
   async function flowExisting(division) {
-    const { data, error } = await client.from("flow_rows")
-      .select("id,community_name,community_num,plan,elevation,first_trench_date,last_trench_date,plan_name,sort_order")
-      .eq("division", division);
-    if (error) return { ok: false, error: friendly(error), rows: [] };
-    return { ok: true, rows: data || [] };
+    return await selectAll(
+      () => client.from("flow_rows")
+        .select("id,community_name,community_num,plan,elevation,first_trench_date,last_trench_date,plan_name,sort_order")
+        .eq("division", division),
+      "id"
+    );
   }
 
   /* Adds new rows and nudges first_trench_date / last_trench_date on existing
