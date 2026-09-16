@@ -1495,28 +1495,49 @@
      number has not been assigned yet so it reads "TBD Sunfish Drive". Either way
      the STREET is there, and the streets of a subdivision are enough to place it
      — see resolveLocation(). */
-  /* Z-prefixed Bldg = a townhome BUILDING SHELL job (slab, block, framing), not a
-     home. Lennar pays the shell a building at a time rather than by the unit, so
-     the schedule carries one Z row for the building PLUS the per-unit rows for
-     everything else. Counting the Z row therefore adds a phantom start for every
-     townhome building — the building is already represented by its units.
+  /* A townhome BUILDING SHELL job — slab, block and framing, which Lennar pays a
+     building at a time — is identified by its JOB NUMBER, not by Bldg.
 
-     This is only true of the MAP's count, which answers "how many homes started
-     here". Takeoff Flow deliberately keeps the shell: its "{N}-PLEX" line is the
-     takeoff for the shell, estimated separately from the per-unit plan lines. So
+     The job is a 7-character community code followed by a lot. On a shell row the
+     lot position holds the BUILDING code instead of a lot number:
+
+         25557610013   Bldg Z013   Plan H038    <- unit
+         25557610014   Bldg Z013   Plan H039    <- unit
+         ...                                       (6 units in this building)
+         2555761Z013   Bldg Z013   Plan TW66    <- the shell
+
+     DO NOT test Bldg for this. EVERY unit in a townhome building carries the
+     building's Z code in Bldg — that is what Bldg is for — so excluding on Bldg
+     removes the entire community. An earlier version of this function did exactly
+     that and Claire Bay 18TH, which is all townhomes, reported zero starts: in the
+     Tampa log 1,898 rows have a Z-prefixed Bldg and only 266 are shells, so 86% of
+     what it dropped were real homes.
+
+     Slice the RAW job string, never the digits. Community 2553057 has unit lots
+     like "2C01" against Bldg "ZC01", so its shell is "2553057ZC01" — digits() would
+     strip the Z and make the shell indistinguishable from a unit.
+
+     Verified against TPU Starts Log 2026 (5,483 rows): 266 shells, every one with
+     Bldg equal to its job lot, every one carrying a shell plan (TW66, VW72, BVL1,
+     T026), and no shell without a Z Bldg.
+
+     This exclusion is for the MAP's count, which answers "how many homes started
+     here". Takeoff Flow deliberately keeps the shell — its "{N}-PLEX" line is the
+     shell takeoff, estimated separately from the per-unit plan lines — so
      ingest-core.js's isPlexBldg logic is correct as it stands and must not be
-     changed to match this — the two consumers want different things from the same
-     column, and that is by design, not drift.
-
-     Single-family communities put a phase/block code in Bldg ("6", "R") spanning
-     many lots, which is why only the Z prefix counts. Same test as
-     ingest-core.js:485 and takeoff-flow's parseStartSchedule. */
-  const isShellBldg = b => !!b && /^z/i.test(String(b).trim());
+     changed to match this. Two consumers, one column, different needs, by design. */
+  const COMMUNITY_CODE_LEN = 7;
+  const isShellJob = job => {
+    const j = String(job == null ? "" : job).trim();
+    if (j.length <= COMMUNITY_CODE_LEN) return false;
+    return /^z/i.test(j.slice(COMMUNITY_CODE_LEN));
+  };
 
   function parseStarts(rows, sheetName, find) {
     const records = [], idName = {};
     const streets = {};        // community id -> { STREET: lotCount }
-    let skipped = 0, shells = 0, sawBldgColumn = false;
+    let skipped = 0, shells = 0;
+    const shellRows = [];      // held aside so the guard below can put them back
 
     for (const r of rows) {
       let community = null, date = null, kind = "Projected", job = null;
@@ -1547,36 +1568,42 @@
       if (!community || !date) { skipped++; continue; }
       if (id0) idName[id0] = community;
 
-      /* The shell row still names its community, so idName above keeps it. Only
-         the start COUNT excludes it. Streets were already gathered above, before
-         this — deliberately, because a shell is often the very first row a brand
-         new townhome community has, and streets is how a new community gets
-         placed on the map at all. */
-      if ("Bldg" in r) sawBldgColumn = true;
-      if (isShellBldg(r["Bldg"])) { shells++; continue; }
+      /* The shell row still names its community, so idName above keeps it, and
+         streets was gathered further up — deliberately, because a shell is often
+         the very first row a brand new townhome community has and streets is how a
+         new community gets placed on the map at all. Only the start COUNT drops it. */
+      if (isShellJob(job)) { shellRows.push({ id: id0, community, date, kind }); continue; }
 
       records.push({ id: id0, community, date, kind });
     }
 
+    /* Sanity guard. On the real Tampa log shells are 4.9% of rows (266 of 5,483).
+       If this ever matches a large share of the file the assumption behind it has
+       broken — a renumbered job format, a different sheet layout — and excluding
+       them would gut the map the way testing Bldg once gutted every townhome
+       community. Fail toward the SMALLER error: keep the rows (counts read
+       slightly high) and say so loudly, rather than publishing zeros.
+
+       GUARD_MIN_ROWS exists because a proportion is not evidence on a short file.
+       A handful of rows can legitimately be mostly shells — one building's worth
+       of rows, a single-community extract — and tripping on that would restore the
+       over-count for no reason. Below the floor, trust the job-number rule. */
+    const GUARD_MIN_ROWS = 40, GUARD_MAX_SHARE = 0.25;
+    const shellShare = rows.length ? shellRows.length / rows.length : 0;
+    if (rows.length >= GUARD_MIN_ROWS && shellShare > GUARD_MAX_SHARE) {
+      for (const s of shellRows) records.push(s);
+      find.notes.push(`starts: ${shellRows.length} of ${rows.length} rows (${Math.round(shellShare * 100)}%) `
+        + `look like townhome building-shell jobs, which is far more than expected — the job-number format may `
+        + `have changed. They have been COUNTED rather than excluded, so townhome communities may read high by `
+        + `one per building. Worth checking the Job column.`);
+    } else {
+      shells = shellRows.length;
+    }
+
     find.notes.push(`starts: sheet "${sheetName}", ${rows.length} rows → ${records.length} start records`
       + (skipped ? `, ${skipped} skipped (no community or no date)` : "")
-      + (shells ? `, ${shells} townhome shell row(s) excluded (Z-prefixed Bldg — building-level slab/block/framing, not a home start)` : ""));
+      + (shells ? `, ${shells} townhome building-shell row(s) excluded (slab/block/framing paid per building, not a home start)` : ""));
 
-    /* If the column is missing entirely, the shell exclusion above is silently
-       doing nothing and townhome communities read high by one per building. That
-       needs to be VISIBLE — but as a note, not a problem.
-
-       problems are wired to `blocking` (blueprint/app.js:1623) and abort the run in
-       import-workbooks.js, so raising one here would refuse the whole map import
-       for any sheet without a Bldg column. Several layouts legitimately lack it,
-       including the START SCHEDULE and Start Log fixtures. Blocking a good import
-       over a count that is slightly high in one community type is a far worse
-       failure than the over-count itself. Notes appear in the import summary,
-       which is the right level: the operator sees it, the publish proceeds. */
-    if (!sawBldgColumn && rows.length) {
-      find.notes.push(`starts: no "Bldg" column in this sheet, so townhome building-shell rows `
-        + `cannot be told apart from home starts — townhome communities may read high by one per building`);
-    }
     if (!records.length) {
       find.problems.push("the starts workbook produced no usable rows — wrong file, or the columns have been renamed");
     }
