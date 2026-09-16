@@ -1495,10 +1495,28 @@
      number has not been assigned yet so it reads "TBD Sunfish Drive". Either way
      the STREET is there, and the streets of a subdivision are enough to place it
      — see resolveLocation(). */
+  /* Z-prefixed Bldg = a townhome BUILDING SHELL job (slab, block, framing), not a
+     home. Lennar pays the shell a building at a time rather than by the unit, so
+     the schedule carries one Z row for the building PLUS the per-unit rows for
+     everything else. Counting the Z row therefore adds a phantom start for every
+     townhome building — the building is already represented by its units.
+
+     This is only true of the MAP's count, which answers "how many homes started
+     here". Takeoff Flow deliberately keeps the shell: its "{N}-PLEX" line is the
+     takeoff for the shell, estimated separately from the per-unit plan lines. So
+     ingest-core.js's isPlexBldg logic is correct as it stands and must not be
+     changed to match this — the two consumers want different things from the same
+     column, and that is by design, not drift.
+
+     Single-family communities put a phase/block code in Bldg ("6", "R") spanning
+     many lots, which is why only the Z prefix counts. Same test as
+     ingest-core.js:485 and takeoff-flow's parseStartSchedule. */
+  const isShellBldg = b => !!b && /^z/i.test(String(b).trim());
+
   function parseStarts(rows, sheetName, find) {
     const records = [], idName = {};
     const streets = {};        // community id -> { STREET: lotCount }
-    let skipped = 0;
+    let skipped = 0, shells = 0, sawBldgColumn = false;
 
     for (const r of rows) {
       let community = null, date = null, kind = "Projected", job = null;
@@ -1528,11 +1546,37 @@
 
       if (!community || !date) { skipped++; continue; }
       if (id0) idName[id0] = community;
+
+      /* The shell row still names its community, so idName above keeps it. Only
+         the start COUNT excludes it. Streets were already gathered above, before
+         this — deliberately, because a shell is often the very first row a brand
+         new townhome community has, and streets is how a new community gets
+         placed on the map at all. */
+      if ("Bldg" in r) sawBldgColumn = true;
+      if (isShellBldg(r["Bldg"])) { shells++; continue; }
+
       records.push({ id: id0, community, date, kind });
     }
 
     find.notes.push(`starts: sheet "${sheetName}", ${rows.length} rows → ${records.length} start records`
-      + (skipped ? `, ${skipped} skipped (no community or no date)` : ""));
+      + (skipped ? `, ${skipped} skipped (no community or no date)` : "")
+      + (shells ? `, ${shells} townhome shell row(s) excluded (Z-prefixed Bldg — building-level slab/block/framing, not a home start)` : ""));
+
+    /* If the column is missing entirely, the shell exclusion above is silently
+       doing nothing and townhome communities read high by one per building. That
+       needs to be VISIBLE — but as a note, not a problem.
+
+       problems are wired to `blocking` (blueprint/app.js:1623) and abort the run in
+       import-workbooks.js, so raising one here would refuse the whole map import
+       for any sheet without a Bldg column. Several layouts legitimately lack it,
+       including the START SCHEDULE and Start Log fixtures. Blocking a good import
+       over a count that is slightly high in one community type is a far worse
+       failure than the over-count itself. Notes appear in the import summary,
+       which is the right level: the operator sees it, the publish proceeds. */
+    if (!sawBldgColumn && rows.length) {
+      find.notes.push(`starts: no "Bldg" column in this sheet, so townhome building-shell rows `
+        + `cannot be told apart from home starts — townhome communities may read high by one per building`);
+    }
     if (!records.length) {
       find.problems.push("the starts workbook produced no usable rows — wrong file, or the columns have been renamed");
     }
