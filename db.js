@@ -515,16 +515,37 @@ window.BPDB = (function () {
         return row;
       });
 
-      // One row per id: the planner already collapsed duplicates, but a batch that
-      // touched the same id twice would fail the whole upsert.
+      /* One row per id: the planner already collapsed duplicates, but a batch that
+         touched the same id twice would fail the whole upsert.
+
+         EVERY OBJECT IN THIS ARRAY MUST CARRY THE SAME KEYS. Setting a date column
+         only when it had moved reads like a tidy partial write and is a data-loss
+         bug. postgrest-js resolves a mixed-key array by taking the UNION of all
+         keys and sending it as ?columns= — which is exactly what avoids
+         PostgREST's "All object keys must match" error, so nothing errors. For an
+         object missing a key in that union PostgREST writes NULL, and
+         resolution=merge-duplicates applies it. A row whose only change was
+         last_trench_date had first_trench_date overwritten with NULL, blanking
+         every calculated date that derives from it.
+
+         One Orlando import on 2026-09-14 did this to 26 rows. Nothing errored.
+
+         So: carry both columns on every row, falling back to the row's CURRENT
+         value when this import did not move that date. The identical fix is in
+         takeoff-flow/app.js publishImport — per the root README, a change to the
+         import pipeline has to land in both repos, and the automated guard on
+         that is gone.                                                           */
+      const curById = new Map(ex.rows.map(r => [r.id, r]));
       const byId = new Map();
       (updates || []).forEach(u => byId.set(u.id, { id: u.id, trTo: u.trTo }));
       (lastUpdates || []).forEach(u => { const cur = byId.get(u.id) || { id: u.id }; cur.lastTo = u.to; byId.set(u.id, cur); });
       const updRows = [...byId.values()].map(u => {
-        const row = { id: u.id, division, updated_at: now, updated_by: email };
-        if (u.trTo) row.first_trench_date = u.trTo;
-        if (u.lastTo) row.last_trench_date = u.lastTo;
-        return row;
+        const cur = curById.get(u.id) || {};
+        return {
+          id: u.id, division, updated_at: now, updated_by: email,
+          first_trench_date: u.trTo   || cur.first_trench_date || null,
+          last_trench_date:  u.lastTo || cur.last_trench_date  || null
+        };
       });
 
       if (newRows.length) await bulk("insert", "flow_rows", newRows);
