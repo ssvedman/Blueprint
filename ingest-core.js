@@ -311,6 +311,60 @@
     return { byCode, counts, total: (rows || []).length };
   }
 
+  /* Is the RE2 export complete?
+
+     The export arrives sorted by trade code: a few small blocks at the top that
+     each run A to Z, then one main block, also A to Z, holding most of the file.
+     On 2026-09-23 that main block stopped at PSV — the file was well formed,
+     103,601 rows, closed cleanly, but everything from Roofing to Windows was
+     missing for all but a handful of communities. Intake read it faithfully and
+     the only symptom was assignments falling 25-32%, under the 50% guard.
+
+     So: find the longest run of non-decreasing trade codes. If it holds most of
+     the file, and ten or more trade codes that sort AFTER where it stops turn
+     up elsewhere in the file but never in it, the run was cut short. A healthy
+     export's main block runs to the end of the alphabet and nothing sorts past
+     it; an export that isn't sorted at all has no dominant run and is left to
+     the coverage check in guardVendorPayload. */
+  function re2Shape(rows) {
+    rows = rows || [];
+    if (!rows.length) return null;
+    const code = r => String(r["Trade Code"] == null ? "" : r["Trade Code"]).trim().toUpperCase();
+    let best = { start: 0, len: 0 }, s = 0;
+    for (let i = 1; i <= rows.length; i++) {
+      if (i === rows.length || code(rows[i]) < code(rows[i - 1])) {
+        if (i - s > best.len) best = { start: s, len: i - s };
+        s = i;
+      }
+    }
+    const main = rows.slice(best.start, best.start + best.len);
+    const last = code(main[main.length - 1]);
+    const inMain = new Set(main.map(code));
+    const beyond = new Map();          // code -> { desc, n }
+    for (const r of rows) {
+      const c = code(r);
+      if (c <= last || inMain.has(c)) continue;
+      const e = beyond.get(c) || { desc: S(r["Trade Desc."]) || S(r["Trade Desc"]) || c, n: 0 };
+      e.n++; beyond.set(c, e);
+    }
+    const truncated = best.len >= rows.length * 0.5 && beyond.size >= 10;
+    return {
+      total: rows.length, mainRows: best.len, mainStartRow: best.start + 2, mainEndRow: best.start + best.len + 1,
+      mainFirst: code(main[0]), mainLast: last, beyondCount: beyond.size,
+      // the most common ones, so the message names trades people recognise
+      beyondSample: [...beyond.values()].sort((a, b) => b.n - a.n).slice(0, 10).map(e => e.desc),
+      truncated
+    };
+  }
+  function re2ShapeMessage(sh) {
+    return `The RE2 export looks cut off. It is sorted by trade code, and its main block stops at `
+      + `trade code ${sh.mainLast} at spreadsheet row ${sh.mainEndRow.toLocaleString()}`
+      + `${sh.mainEndRow >= sh.total + 1 ? ", the last row in the file" : ""}. `
+      + `${sh.beyondCount} trade codes that sort after that — ${sh.beyondSample.join(", ")}… — `
+      + `appear only in the small blocks at the top of the file, so almost every community would lose them. `
+      + `Re-run the RE2 export (it may have hit a row limit) and drop the complete file.`;
+  }
+
   /* Which tab Vendor Assignments reads, and how it got there.
 
      Split out from parseStartsVP because this is the part with a bug history —
@@ -714,9 +768,16 @@
      through is not a guard. */
   const SHRINK_REFUSE = 0.5;
   const SHRINK_WARN   = 0.3;
+  const ASSIGN_WARN   = 0.2;   // assignments falling this much is worth saying out loud
+  /* A trade "collapses" when it covered 20+ communities and now covers under
+     half of them. One or two can be a genuine change of supplier; ten at once
+     is a file that is missing rows. */
+  const COLLAPSE_MIN_COMMS = 20, COLLAPSE_RATIO = 0.5, COLLAPSE_REFUSE = 10;
 
-  function guardVendorPayload(next, current, diag, divisionCode, re2Counts) {
+  function guardVendorPayload(next, current, diag, divisionCode, re2Counts, re2ShapeInfo) {
     const blocking = [], warnings = [], notes = [];
+
+    if (re2ShapeInfo && re2ShapeInfo.truncated) blocking.push(re2ShapeMessage(re2ShapeInfo));
 
     if (re2Counts) {
       const match = re2Counts[divisionCode] || 0;
@@ -744,6 +805,37 @@
       if (curA && newA < curA * SHRINK_REFUSE) {
         blocking.push(`Would remove over ${Math.round((1 - SHRINK_REFUSE) * 100)}% of trade assignments `
                     + `(${curA.toLocaleString()} → ${newA.toLocaleString()}).`);
+      } else if (curA && newA < curA * (1 - ASSIGN_WARN)) {
+        warnings.push(`Trade assignments fall ${Math.round((1 - newA / curA) * 100)}% `
+                    + `(${curA.toLocaleString()} → ${newA.toLocaleString()}).`);
+      }
+
+      /* Trade coverage, category by category. Catches an incomplete export
+         however it happens to be sorted: the cut-off file took Roofing Turnkey
+         from most Orlando communities down to 78 while Plumbing, which sorts
+         before the cut, stayed at 676. */
+      const cover = vs => {
+        const m = new Map();
+        for (const v of vs || []) {
+          let set = m.get(v.category); if (!set) { set = new Set(); m.set(v.category, set); }
+          for (const c of v.assigned || []) set.add(c);
+        }
+        return m;
+      };
+      const covBefore = cover(current.vendors), covAfter = cover(next.vendors);
+      const collapsed = [];
+      for (const [cat, set] of covBefore) {
+        if (set.size < COLLAPSE_MIN_COMMS) continue;
+        const now = (covAfter.get(cat) || new Set()).size;
+        if (now < set.size * COLLAPSE_RATIO) collapsed.push({ cat, before: set.size, after: now });
+      }
+      collapsed.sort((a, b) => (b.before - b.after) - (a.before - a.after));
+      if (collapsed.length) {
+        const list = collapsed.slice(0, 8).map(c => `${c.cat} ${c.before} → ${c.after}`).join("; ");
+        const msg = `${collapsed.length} trade${collapsed.length === 1 ? "" : "s"} would lose over half the `
+                  + `communities they cover: ${list}${collapsed.length > 8 ? "; …" : ""}.`;
+        if (collapsed.length >= COLLAPSE_REFUSE) blocking.push(msg + " That pattern means rows are missing from the export, not a change of suppliers.");
+        else warnings.push(msg);
       }
     }
 
@@ -779,9 +871,9 @@
     VP_STARTS_SHEETS, TF_STARTS_SHEETS, TF_STARTS_FALLBACKS, FLOW_SHEET,
     TPU_CONTACTS_SHEET, TPU_ACM_SHEET,
     findSheet, sheetsNeeded, sniff, pickStartsSheetVP,
-    re2Rows, bucketRE2, parseStartsVP, buildVendorPayload, diffPayload,
+    re2Rows, bucketRE2, re2Shape, re2ShapeMessage, parseStartsVP, buildVendorPayload, diffPayload,
     parseStartsTF, planFlowImport, flowChangeEntry, normPlan, combo,
     REQUIREMENTS, missingFor, presentFor, planTargets,
-    SHRINK_REFUSE, SHRINK_WARN, guardVendorPayload, sheetDisagreement
+    SHRINK_REFUSE, SHRINK_WARN, ASSIGN_WARN, guardVendorPayload, sheetDisagreement
   };
 });

@@ -131,7 +131,10 @@ self.onmessage = function (e) {
         // The buckets travel back to the page because the vendor payload for each
         // division is built there, against the current published payload. Rows are
         // plain objects, so structured clone handles them.
-        out.re2 = { counts: bucket.counts, total: bucket.total, byCode: bucket.byCode };
+        // Shape is checked on the whole file, before it is split by division:
+        // a cut-off export is cut off for everyone.
+        const shape = self.BPI.re2Shape(rows);
+        out.re2 = { counts: bucket.counts, total: bucket.total, byCode: bucket.byCode, shape };
 
         /* The map wants the same rows shaped differently — community → trade →
            vendor rather than vendor → communities. Done here rather than on the
@@ -146,6 +149,8 @@ self.onmessage = function (e) {
         for (const [divKey, code] of [["orlando", "OLH"], ["tampa", "TPU"]]) {
           const mapFind = { notes: [], problems: [] };
           const mapRe2 = self.MAPCORE.parseRE2(bucket.byCode[code] || [], code, mapFind, bucket.counts);
+          // The map takes its trades from the same rows, so it must refuse too.
+          if (shape && shape.truncated) mapFind.problems.push(self.BPI.re2ShapeMessage(shape));
           // Maps survive structured clone, so they cross intact.
           out.mapRe2ByDiv[divKey] = { byCommunity: mapRe2.byCommunity, nameHint: mapRe2.nameHint,
                                       notes: mapFind.notes, problems: mapFind.problems };

@@ -36,6 +36,15 @@ applications.
 Parsing runs off the main thread — the largest export is around 7 MB and 144,000 rows,
 which is long enough to freeze a tab.
 
+**An incomplete vendor export is refused, not published.** The RE2 export is sorted by
+trade code. On 2026-09-23 one arrived well formed but cut off at trade code PSV, 103,600
+rows, so every trade from Roofing to Windows was missing for almost every community.
+Assignments fell 25–32%, under the 50% guard, and the preview showed only large swings.
+Two checks now stop it, independently: the export's main sorted block ending early while
+later trade codes appear elsewhere in the file (`re2Shape`), and ten or more trades
+losing over half the communities they covered against what is published. Both block
+Vendor Assignments; the first blocks the Community Map too, which reads the same rows.
+
 ### Communities awaiting a location
 
 A community new to the permit log arrives with no coordinate, and until it has one it is

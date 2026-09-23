@@ -1465,7 +1465,7 @@
           t.division, re2.parsed.re2.byCode[code], startsRec.parsed.vp, t.currentPayload);
         t.diff = t.currentPayload ? BPI.diffPayload(t.currentPayload, t.payload) : null;
         t.guard = BPI.guardVendorPayload(
-          t.payload, t.currentPayload, t.payload._diag, code, re2.parsed.re2.counts);
+          t.payload, t.currentPayload, t.payload._diag, code, re2.parsed.re2.counts, re2.parsed.re2.shape);
         t.sheetNote = BPI.sheetDisagreement(
           startsRec.parsed.vp.sheet, startsRec.parsed.tf.sheet, startsRec.parsed.vp.via);
       }
