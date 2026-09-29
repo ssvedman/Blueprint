@@ -63,3 +63,4 @@ secrets.json
 #                         the repo, because a test suite you can't clone is not a
 #                         test suite.
 diagnose_set_password.sql
+harden_admin_lifecycle.sql
