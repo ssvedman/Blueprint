@@ -676,7 +676,9 @@ window.BPDB = (function () {
     const m = (error && error.message) || String(error);
     if (/Invalid login credentials/i.test(m)) return "That email and password don't match an account.";
     if (/not authorized/i.test(m)) return "You aren't an admin for that app, so this action was refused.";
-    if (/does not exist/i.test(m)) return "That function isn't installed in the database yet — run supabase_setup.sql.";
+    // Any "X does not exist" lands here (missing function, table, extension fn like
+    // gen_salt). Keep the raw text so the actual missing object is visible.
+    if (/does not exist/i.test(m)) return "The database is missing something this needs: " + m;
     if (/duplicate key/i.test(m)) return "That already exists.";
     if (/Failed to fetch|NetworkError/i.test(m)) return "Couldn't reach the database. Check your connection.";
     return m;
