@@ -1,6 +1,6 @@
 -- ============================================================================
 --  Admin account lifecycle hardening (cross-app). Idempotent; safe to re-run.
---  Applied live 2026-09-17. Complements harden_admin_no_peer_reset.sql.
+--  Applied live 2026-09-17; trigger bodies re-verified against live 2026-09-29.
 --
 --  Closes three residual paths by which a single-app admin could still take over
 --  another admin over the SHARED auth.users:
@@ -16,56 +16,18 @@
 --      outstanding reset links in both token pools.
 -- ============================================================================
 
--- 1. Redeem-time admin check (both pools). Requires public.is_admin_email(text).
-create or replace function public.redeem_reset_token(p_token text, p_new_password text)
- returns json language plpgsql security definer set search_path to '' as $function$
-declare r record;
-begin
-  if p_new_password is null or length(p_new_password) < 8 then
-    return json_build_object('ok', false, 'error', 'Password must be at least 8 characters.'); end if;
-  select * into r from public.password_reset_tokens
-   where token = encode(extensions.digest(coalesce(p_token, ''), 'sha256'), 'hex');
-  if not found then return json_build_object('ok', false, 'error', 'Invalid or unknown link.'); end if;
-  if r.used_at is not null then return json_build_object('ok', false, 'error', 'This link has already been used.'); end if;
-  if r.expires_at < now() then return json_build_object('ok', false, 'error', 'This link has expired.'); end if;
-  if public.is_admin_email(r.email) then
-    return json_build_object('ok', false, 'error', 'Admin passwords must be reset by an administrator directly, not via a reset link.'); end if;
-  update auth.users set encrypted_password = extensions.crypt(p_new_password, extensions.gen_salt('bf')), updated_at = now()
-   where lower(email) = r.email;
-  if not found then return json_build_object('ok', false, 'error', 'Account not found.'); end if;
-  update public.password_reset_tokens set used_at = now() where token = r.token;
-  return json_build_object('ok', true);
-end; $function$;
-
-create or replace function public.cdb_redeem_reset_token(p_token text, p_new_password text)
- returns jsonb language plpgsql security definer set search_path to 'public','auth','extensions' as $function$
-declare v_email text; v_created timestamptz; v_used timestamptz;
-        v_hash text := encode(digest(coalesce(p_token,''), 'sha256'), 'hex'); begin
-  if length(coalesce(p_new_password,'')) < 8 then
-    return jsonb_build_object('ok', false, 'error', 'Password must be at least 8 characters.'); end if;
-  select email, created_at, used_at into v_email, v_created, v_used from public.cdb_reset_tokens where token = v_hash;
-  if v_email is null then return jsonb_build_object('ok', false, 'error', 'Invalid link.'); end if;
-  if v_used is not null then return jsonb_build_object('ok', false, 'error', 'This link was already used.'); end if;
-  if now() - v_created > interval '14 days' then return jsonb_build_object('ok', false, 'error', 'This link has expired.'); end if;
-  if public.is_admin_email(v_email) then
-    return jsonb_build_object('ok', false, 'error', 'Admin passwords must be reset by an administrator directly, not via a reset link.'); end if;
-  update public.cdb_reset_tokens set used_at = now() where token = v_hash and used_at is null;
-  if not found then return jsonb_build_object('ok', false, 'error', 'This link was already used.'); end if;
-  update auth.users set encrypted_password = crypt(p_new_password, gen_salt('bf')),
-         email_confirmed_at = coalesce(email_confirmed_at, now()), updated_at = now()
-   where lower(email) = v_email;
-  if not found then return jsonb_build_object('ok', false, 'error', 'Account not found.'); end if;
-  begin
-    delete from auth.sessions where user_id::text = (select id::text from auth.users where lower(email) = v_email);
-    delete from auth.refresh_tokens where user_id::text = (select id::text from auth.users where lower(email) = v_email);
-  exception when undefined_table or undefined_column or undefined_function or insufficient_privilege then null; end;
-  return jsonb_build_object('ok', true);
-end $function$;
+-- 1. Redeem-time admin check (both pools). The redeemers are defined ONLY in
+--    their source-of-truth files, both of which carry this check:
+--      Pool A  public.redeem_reset_token()      takeoff-flow/harden_reset_tokens_poolA.sql
+--      Pool B  public.cdb_redeem_reset_token()  community-db/supabase_setup.sql
+--    They used to be duplicated here; a re-run of an older copy elsewhere broke
+--    every Pool A reset on 2026-09-29, so they are no longer copied.
 
 -- 2 & 3. Role-table triggers (app_roles / tf_app_roles / cdb_app_roles).
 create or replace function public.protect_admin_role_change() returns trigger
  language plpgsql security definer set search_path to '' as $function$
 declare caller text := lower(coalesce(auth.jwt()->>'email','')); begin
+  -- service_role / SQL editor (no JWT) bypass, so admins can still be managed at the DB level
   if caller <> '' and old.role = 'admin' and lower(old.email) <> caller then
     raise exception 'You cannot change or remove another admin''s role. Do it at the database level.';
   end if;
