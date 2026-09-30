@@ -23,7 +23,7 @@
 --    They used to be duplicated here; a re-run of an older copy elsewhere broke
 --    every Pool A reset on 2026-09-29, so they are no longer copied.
 
--- 2 & 3. Role-table triggers (app_roles / tf_app_roles / cdb_app_roles).
+-- 2 & 3. Role-table triggers (app_roles / tf_app_roles / cdb_app_roles / pdb_app_roles).
 create or replace function public.protect_admin_role_change() returns trigger
  language plpgsql security definer set search_path to '' as $function$
 declare caller text := lower(coalesce(auth.jwt()->>'email','')); begin
@@ -47,7 +47,7 @@ begin
 end $function$;
 
 do $$ declare t text; begin
-  foreach t in array array['app_roles','tf_app_roles','cdb_app_roles'] loop
+  foreach t in array array['app_roles','tf_app_roles','cdb_app_roles','pdb_app_roles'] loop
     if to_regclass('public.'||t) is not null then
       execute format('drop trigger if exists trg_protect_admin on public.%I', t);
       execute format('create trigger trg_protect_admin before update or delete on public.%I for each row execute function public.protect_admin_role_change()', t);

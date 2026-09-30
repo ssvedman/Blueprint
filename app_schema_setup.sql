@@ -1024,8 +1024,8 @@ declare
 begin
   if not public.hub_is_any_admin() then
     raise exception 'app.run_select is restricted to hub admins'
-      using hint = 'No admin row for your account in app_roles, tf_app_roles '
-                || 'or cdb_app_roles. This also fails in the Supabase SQL '
+      using hint = 'No admin row for your account in app_roles, tf_app_roles, '
+                || 'cdb_app_roles or pdb_app_roles. This also fails in the Supabase SQL '
                 || 'editor, which carries no JWT -- call it from the console.';
   end if;
 

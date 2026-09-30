@@ -71,6 +71,14 @@ begin
   exception when undefined_table then null;
   end;
 
+  -- Plan-DB (its own role table since plan-db/separate_roles.sql)
+  begin
+    select exists(select 1 from public.pdb_app_roles
+                   where lower(email) = v_email and role = 'admin') into v_found;
+    if v_found then return true; end if;
+  exception when undefined_table then null;
+  end;
+
   return false;
 end $$;
 
