@@ -2600,7 +2600,14 @@
         if (!up) alerts.push(app.name + " did not respond.");
         continue;
       }
-      const p = await healthForApp(app, H, alerts, state.isAdmin);
+      /* Community-DB drafts, review flags and revisions are division-scoped by
+         RLS (cdb_can_edit): an Orlando-only editor, or an admin of some OTHER app,
+         sees only part of them — silently. Only a Community-DB admin sees every
+         division, so only they get those metrics. */
+      const full = app.slug === "Community-DB"
+        ? state.adminSlugs.indexOf(app.slug) !== -1
+        : state.isAdmin;
+      const p = await healthForApp(app, H, alerts, full);
       if (stale()) return;
       panels.push(p);
     }

@@ -384,8 +384,9 @@ values
    array['Denis Crepes','Stephen Svedman'], true, 'shared',
    null,
    'cdb_app_roles', 'cdb_admin_list_users', 'cdb_admin_add_or_reset', 'B', null,
-   array['admin','editor','viewer'], array[]::text[],
-   '{"kind":"config"}'::jsonb),
+   -- editors are division-scoped (cdb_app_roles.divisions) — see community-db/add_divisions.sql
+   array['admin','editor','viewer'], array['editor'],
+   '{"kind":"config","divisions":[{"key":"orlando","label":"Orlando Division","code":"OLH"},{"key":"tampa","label":"Tampa Division","code":"TPU"}]}'::jsonb),
 
   -- No sign-in, so no role table and no entry in Users — but its data IS in this
   -- database now (map_data) and Data Intake publishes it, so Health reports on it

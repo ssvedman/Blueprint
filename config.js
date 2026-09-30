@@ -110,9 +110,10 @@ window.APP_CONFIG = {
       // row here still has to be cleared first, and only a Community-DB admin
       // can do that. buildRemovalPlan() refuses rather than orphaning it.
       delete_rpc: null,
-      roles: ["admin", "editor", "viewer"], division_scoped_roles: [],
+      roles: ["admin", "editor", "viewer"], division_scoped_roles: ["editor"],
       division_source: { kind: "config", divisions: [
-        { key: "orlando", label: "Orlando Division", code: "OLH" }
+        { key: "orlando", label: "Orlando Division", code: "OLH" },
+        { key: "tampa", label: "Tampa Division", code: "TPU" }
       ] }
     },
     {
