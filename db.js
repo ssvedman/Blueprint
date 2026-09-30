@@ -153,6 +153,30 @@ window.BPDB = (function () {
 
   /* ---------------------------------------------------------------- users */
 
+  /* Which of a list RPC's rows are real role rows.
+
+     The list RPCs return EVERY login with its role coalesced to 'viewer' (that
+     is what the apps' own admin pages want). Community-DB's did exactly that and
+     carried no marker, so mergeUsers took every account as an explicit
+     Community-DB viewer: the grid never said "implicit viewer", setting someone
+     back to implicit deleted nothing and bounced straight back to "viewer", and
+     Remove access refused anyone for an operator who is not a Community-DB admin
+     ("they hold a role in Community-DB") — for a row that does not exist.
+
+     An RPC that returns an `explicit` boolean is taken at its word
+     (cdb_admin_list_users does, from community-db/add_divisions.sql). Otherwise
+     the role table itself is the evidence: a row there is explicit, anything
+     else is implicit. An admin can read every row of it under each app's RLS;
+     if that read fails, the rows are left as they were rather than guessed. */
+  async function markExplicit(app, rows) {
+    if (!rows.length || rows.every(r => typeof r.explicit === "boolean")) return rows;
+    const { data, error } = await client.from(app.role_table).select("email");
+    if (error || !Array.isArray(data)) return rows;
+    const have = new Set(data.map(r => BP.normalizeEmail(r.email)));
+    return rows.map(r => typeof r.explicit === "boolean" ? r
+      : { ...r, explicit: have.has(BP.normalizeEmail(r.email)) });
+  }
+
   async function loadUsers(apps) {
     const managed = BP.managedApps(apps);
     const rolesByApp = {};
@@ -160,8 +184,8 @@ window.BPDB = (function () {
 
     for (const app of managed) {
       const { data, error } = await client.rpc(app.list_rpc);
-      if (error) { failures.push({ app: app.name, error: friendly(error) }); rolesByApp[app.slug] = []; }
-      else rolesByApp[app.slug] = data || [];
+      if (error) { failures.push({ app: app.name, error: friendly(error) }); rolesByApp[app.slug] = []; continue; }
+      rolesByApp[app.slug] = await markExplicit(app, data || []);
     }
 
     // last_sign_in is only available from the mock; live Supabase does not
